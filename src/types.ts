@@ -56,6 +56,7 @@ export interface TextStyle {
   opacity: number
   bold: boolean
   italic: boolean
+  lineHeight?: number
 }
 
 export interface RenderSegment {

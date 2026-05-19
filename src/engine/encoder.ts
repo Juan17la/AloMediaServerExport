@@ -1,6 +1,9 @@
 import { config } from "../config.js"
 import type { ExportJob } from "../types.js"
 import { spawn, type ChildProcess } from "node:child_process"
+import { writeFileSync, mkdtempSync } from "node:fs"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
 
 const FRAME_REGEX = /frame=\s*(\d+)/
 const FPS_REGEX = /fps=\s*([\d.]+)/
@@ -20,10 +23,24 @@ export async function runFfmpeg(
   onProgress: (framesProcessed: number, fps: number, timeS: number) => void,
   abortSignal?: AbortSignal,
 ): Promise<EncoderResult> {
+  const fontconfigDir = mkdtempSync(join(tmpdir(), "alomedia-fc-"))
+  const fontconfigContent = `<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <dir>${config.fontDir.replace(/\\/g, "/")}</dir>
+</fontconfig>`
+  const fontconfigPath = join(fontconfigDir, "fonts.conf")
+  writeFileSync(fontconfigPath, fontconfigContent)
+
   return new Promise((resolve) => {
     const ffmpegPath = config.ffmpegPath
     const child: ChildProcess = spawn(ffmpegPath, args, {
       stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        FONTCONFIG_FILE: fontconfigPath,
+        FONTCONFIG_PATH: fontconfigDir,
+      },
     })
 
     let lastFrames = 0

@@ -6,6 +6,7 @@ import { buildFilterGraph } from "./filterGraphBuilder.js"
 import { runFfmpeg } from "./encoder.js"
 import { join } from "node:path"
 import { probeMediaFile } from "./probe.js"
+import { renderTextSegmentsToFiles } from "./textRenderer.js"
 
 export interface PipelineResult {
   success: boolean
@@ -28,15 +29,13 @@ export async function executePipeline(
   // Build probe results from the plan (client sends probe data)
   const probeResults = new Map(plan.probeResults.map((p) => [p.mediaId, p]))
 
-  // Re-probe server-side saved assets for additional verification
+  // Re-probe server-side saved assets and override client-sent probes
   for (const [mediaId, filePath] of assetPaths) {
-    if (!probeResults.has(mediaId)) {
-      try {
-        const probe = await probeMediaFile(filePath, mediaId)
-        probeResults.set(mediaId, probe)
-      } catch (err) {
-        console.warn(`[pipeline] Failed to probe ${mediaId}: ${err instanceof Error ? err.message : String(err)}`)
-      }
+    try {
+      const probe = await probeMediaFile(filePath, mediaId)
+      probeResults.set(mediaId, probe)
+    } catch (err) {
+      console.warn(`[pipeline] Failed to probe ${mediaId}: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
@@ -79,8 +78,17 @@ export async function executePipeline(
 
   onProgress("planning", 10, 0, plan.estimatedTotalFrames)
 
+  // Pre-render text segments to PNG files
+  const textImagePaths = await renderTextSegmentsToFiles(
+    plan.segments,
+    outputTarget.resolution.width,
+    outputTarget.resolution.height,
+    config.tempDir,
+    job.id,
+  )
+
   // Full encode path: build filter graph and encode
-  const graph = buildFilterGraph(plan, probeResults, assetPaths)
+  const graph = buildFilterGraph(plan, probeResults, assetPaths, textImagePaths)
   const outputPath = join(config.tempDir, `${job.id}.${outputTarget.format}`)
 
   const encodingPreset = "fast"

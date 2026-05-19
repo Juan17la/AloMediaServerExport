@@ -32,10 +32,10 @@ export async function probeMediaFile(filePath: string, mediaId: string): Promise
       duration,
       isVfr: (videoStream?.r_frame_rate ?? "") !== (videoStream?.avg_frame_rate ?? ""),
       pixelFormat: videoStream?.pix_fmt ?? "yuv420p",
-      audioCodec: audioStream?.codec_name ?? "aac",
-      audioSampleRate: audioStream?.sample_rate ?? 44100,
-      audioChannels: audioStream?.channels ?? 2,
-      audioBitrate: parseInt(audioStream?.bit_rate ?? "128000") / 1000,
+      audioCodec: audioStream?.codec_name ?? null,
+      audioSampleRate: audioStream?.sample_rate ?? null,
+      audioChannels: audioStream?.channels ?? null,
+      audioBitrate: audioStream ? parseInt(audioStream.bit_rate ?? "128000") / 1000 : null,
       fileExtension: filePath.split(".").pop()?.toLowerCase() ?? "mp4",
     }
   } catch (err) {
@@ -49,10 +49,10 @@ export async function probeMediaFile(filePath: string, mediaId: string): Promise
       duration: 0,
       isVfr: false,
       pixelFormat: "yuv420p",
-      audioCodec: "aac",
-      audioSampleRate: 44100,
-      audioChannels: 2,
-      audioBitrate: 128,
+      audioCodec: null,
+      audioSampleRate: null,
+      audioChannels: null,
+      audioBitrate: null,
       fileExtension: filePath.split(".").pop()?.toLowerCase() ?? "mp4",
     }
   }

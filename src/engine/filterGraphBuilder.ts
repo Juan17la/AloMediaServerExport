@@ -6,6 +6,7 @@ import { buildEqFilter, buildShadowFilter, buildDefinitionFilter } from "../util
 import { DEFAULT_COLOR_ADJUSTMENTS } from "../constants/colorAdjustments.js"
 import { DEFAULT_SPEED } from "../constants/speed.js"
 import { resolveCanonicalTransitionType } from "./transitionRegistry.js"
+import { config } from "../config.js"
 
 interface InputInfo {
   mediaId: string
@@ -28,8 +29,10 @@ function nextLabel(prefix: string = "v"): string {
   return `${prefix}${_labelIdx++}`
 }
 
-function hasAudioStream(seg: RenderSegment): boolean {
-  return seg.type === "audio" || seg.type === "video"
+function hasAudioStream(seg: RenderSegment, probe?: MediaProbeResult): boolean {
+  if (seg.type === "audio") return true
+  if (seg.type === "video") return probe?.audioCodec != null
+  return false
 }
 
 function segmentDuration(seg: RenderSegment): number {
@@ -65,6 +68,7 @@ export function buildFilterGraph(
   plan: RenderPlan,
   probeResults: Map<string, MediaProbeResult>,
   filePaths: Map<string, string>,
+  textImagePaths: Map<string, string> = new Map(),
 ): FilterGraphResult {
   const { segments, transitions, outputTarget } = plan
   const { width: targetW, height: targetH } = outputTarget.resolution
@@ -86,14 +90,22 @@ export function buildFilterGraph(
   // Phase 0: Assign input indices and build input args
   const videoSegments = segments.filter((s) => s.trackType === "video" || s.type === "image" || s.type === "text")
   const audioSegments = segments.filter(
-    (s) => s.type === "audio" || (s.type === "video" && hasAudioStream(s)),
+    (s) => hasAudioStream(s, probeResults.get(s.mediaId)),
   )
 
-  // Deduplicate media IDs (skip text — no file input needed)
+  // Deduplicate media IDs
+  // Text segments with pre-rendered PNGs are treated as image inputs.
+  // Text segments without PNGs use the drawtext fallback (no file input).
   const uniqueMediaIds: string[] = []
   const seenMediaIds = new Set<string>()
+  const textSegmentsWithPng = new Set<string>()
   for (const seg of segments) {
-    if (seg.type === "text") continue
+    if (seg.type === "text") {
+      if (textImagePaths.has(seg.id)) {
+        textSegmentsWithPng.add(seg.id)
+      }
+      continue
+    }
     if (seenMediaIds.has(seg.mediaId)) continue
     seenMediaIds.add(seg.mediaId)
     uniqueMediaIds.push(seg.mediaId)
@@ -134,13 +146,36 @@ export function buildFilterGraph(
     inputIndex++
   }
 
+  // Add text PNG inputs (treated as looped images)
+  for (const segId of textSegmentsWithPng) {
+    const seg = segments.find((s) => s.id === segId)
+    if (!seg) continue
+    const pngPath = textImagePaths.get(segId)!.replace(/\\/g, "/")
+    const dur = segmentDuration(seg)
+
+    inputIndexByMediaId.set(segId, inputIndex)
+    inputArgs.push("-loop", "1", "-t", dur.toFixed(3), "-i", pngPath)
+
+    inputInfos.push({
+      mediaId: segId,
+      inputIndex,
+      isImage: true,
+      filePath: pngPath,
+      duration: dur,
+      hasVideo: true,
+      hasAudio: false,
+    })
+    inputIndex++
+  }
+
   // Phase 1: Count references per input for split/asplit
   const videoRefCount = new Map<string, number>()
   const audioRefCount = new Map<string, number>()
 
   for (const seg of videoSegments) {
-    if (seg.type === "text") continue
-    videoRefCount.set(seg.mediaId, (videoRefCount.get(seg.mediaId) ?? 0) + 1)
+    if (seg.type === "text" && !textSegmentsWithPng.has(seg.id)) continue
+    const key = seg.type === "text" ? seg.id : seg.mediaId
+    videoRefCount.set(key, (videoRefCount.get(key) ?? 0) + 1)
   }
   for (const seg of audioSegments) {
     if (seg.type === "text") continue
@@ -209,7 +244,19 @@ export function buildFilterGraph(
 
   for (const seg of videoSegments) {
     const outLabel = nextLabel("segv")
-    const sourceLabel = getVideoSourceLabel(seg.mediaId)
+
+    if (seg.type === "text" && textSegmentsWithPng.has(seg.id)) {
+      // Text with pre-rendered PNG: treat as image input
+      const sourceLabel = getVideoSourceLabel(seg.id)
+      const filters: string[] = []
+      filters.push("format=rgba")
+      filters.push("setpts=PTS-STARTPTS")
+      filters.push(`format=rgba,scale=${targetW}:${targetH}:force_original_aspect_ratio=decrease,pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2:color=black@0`)
+      filters.push(`fps=${targetFps},setpts=PTS-STARTPTS,setsar=1:1`)
+      filterParts.push(`[${sourceLabel}]${filters.join(",")}[${outLabel}]`)
+      segVideoLabels.set(seg.id, outLabel)
+      continue
+    }
 
     if (seg.type === "text") {
       const dur = segmentDuration(seg)
@@ -228,6 +275,7 @@ export function buildFilterGraph(
     }
 
     const probe = probeResults.get(seg.mediaId)
+    const sourceLabel = getVideoSourceLabel(seg.mediaId)
     const filters: string[] = []
 
     // Convert to RGBA for alpha-channel compositing between layers.
@@ -576,18 +624,43 @@ export function buildFilterGraph(
   }
 }
 
+function resolveFontFile(fontFamily: string): string {
+  const normalized = fontFamily.toLowerCase().replace(/['"]/g, "").split(",")[0].trim()
+  const mapped = config.systemFonts[normalized]
+  if (mapped) {
+    return `${config.fontDir}/${mapped}`.replace(/\\/g, "/")
+  }
+  for (const [key, file] of Object.entries(config.systemFonts)) {
+    if (normalized.includes(key)) {
+      return `${config.fontDir}/${file}`.replace(/\\/g, "/")
+    }
+  }
+  return `${config.fontDir}/arial.ttf`.replace(/\\/g, "/")
+}
+
+function escapeDrawtextContent(text: string): string {
+  let s = text
+  s = s.replace(/\\/g, "\\\\")
+  s = s.replace(/'/g, "\\'")
+  s = s.replace(/\n/g, " ")
+  s = s.replace(/\r/g, "")
+  return s
+}
+
 function buildDrawtextFilter(seg: RenderSegment, scaleX: number, scaleY: number): string | null {
   if (!seg.content || seg.type !== "text") return null
 
   const s = seg.style
   if (!s) return null
 
-  const text = seg.content.replace(/'/g, "'\\''")
+  const text = escapeDrawtextContent(seg.content)
   const fontSize = Math.round(s.fontSize * Math.min(scaleX, scaleY))
   const fontColor = s.color ?? "#ffffff"
   const ffmpegColor = fontColor.startsWith("#")
     ? fontColor.replace("#", "0x")
     : fontColor
+
+  const fontFile = resolveFontFile(s.fontFamily ?? "Inter, sans-serif")
 
   const t = seg.transform!
   const px = Math.round(t.x * scaleX)
@@ -607,14 +680,17 @@ function buildDrawtextFilter(seg: RenderSegment, scaleX: number, scaleY: number)
   const yExpr = `${py} + (${sh} - text_h)/2`
 
   const alpha = s.opacity ?? 1
+  const escapedFontFile = fontFile.replace(/:/g, "\\:")
 
   const parts: string[] = [
     `drawtext=text='${text}'`,
+    `fontfile=${escapedFontFile}`,
     `fontsize=${fontSize}`,
     `fontcolor=${ffmpegColor}`,
     `x=${xExpr}`,
     `y=${yExpr}`,
     `alpha=${alpha}`,
+    `expansion=none`,
   ]
 
   if (s.backgroundColor) {
@@ -623,8 +699,6 @@ function buildDrawtextFilter(seg: RenderSegment, scaleX: number, scaleY: number)
       : s.backgroundColor
     parts.push(`box=1`, `boxcolor=${bgColor}`)
   }
-
-  if (s.bold) parts.push(`expansion=normal`)
 
   return parts.join(":")
 }

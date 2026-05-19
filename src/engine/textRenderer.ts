@@ -177,6 +177,8 @@ export async function renderTextSegmentsToFiles(
   const textImagePaths = new Map<string, string>()
   const textSegments = segments.filter((s) => s.type === "text" && s.content && s.style && s.transform)
 
+  console.log(`[textRenderer] jobId=${jobId} — Rendering ${textSegments.length} text segments`)
+
   if (textSegments.length === 0) return textImagePaths
 
   const textDir = join(tempDir, `job_${jobId}_text`)
@@ -184,15 +186,18 @@ export async function renderTextSegmentsToFiles(
 
   for (const seg of textSegments) {
     try {
+      console.log(`[textRenderer] jobId=${jobId} — Rendering text segment ${seg.id}`)
       const pngBuffer = await renderTextSegmentToPng(seg, outputWidth, outputHeight)
       const fileName = `text_${seg.id}.png`
       const filePath = join(textDir, fileName)
       await writeFile(filePath, pngBuffer)
       textImagePaths.set(seg.id, filePath)
+      console.log(`[textRenderer] jobId=${jobId} — Saved text segment ${seg.id} to ${filePath}`)
     } catch (err) {
-      console.warn(`[textRenderer] Failed to render text segment ${seg.id}: ${err instanceof Error ? err.message : String(err)}`)
+      console.warn(`[textRenderer] jobId=${jobId} — Failed to render text segment ${seg.id}: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
+  console.log(`[textRenderer] jobId=${jobId} — Finished rendering text segments`)
   return textImagePaths
 }

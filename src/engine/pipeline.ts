@@ -22,6 +22,7 @@ export async function executePipeline(
   onProgress: (status: string, progress: number, framesProcessed: number, framesTotal: number) => void,
   abortSignal?: AbortSignal,
 ): Promise<PipelineResult> {
+  console.log(`[pipeline] Starting pipeline for jobId=${job.id}`)
   const { outputTarget } = plan
 
   onProgress("probing", 3, 0, plan.estimatedTotalFrames)
@@ -30,17 +31,22 @@ export async function executePipeline(
   const probeResults = new Map(plan.probeResults.map((p) => [p.mediaId, p]))
 
   // Re-probe server-side saved assets and override client-sent probes
+  console.log(`[pipeline] Probing ${assetPaths.size} assets...`)
   for (const [mediaId, filePath] of assetPaths) {
     try {
+      console.log(`[pipeline] Probing asset mediaId=${mediaId} path=${filePath}`)
       const probe = await probeMediaFile(filePath, mediaId)
       probeResults.set(mediaId, probe)
+      console.log(`[pipeline] Probed OK — ${probe.width}x${probe.height}, ${probe.duration}s, codec=${probe.codec}`)
     } catch (err) {
       console.warn(`[pipeline] Failed to probe ${mediaId}: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
+  console.log("[pipeline] Detecting GPU capabilities...")
   const gpuCapabilities = await detectGpuCapabilities()
   const gpuCodec = config.enableGpu ? gpuCapabilities.selectedCodec : null
+  console.log(`[pipeline] GPU selectedCodec=${gpuCodec ?? "none (CPU)"}, encoder=${gpuCapabilities.selectedEncoder}`)
 
   onProgress("planning", 8, 0, plan.estimatedTotalFrames)
 
@@ -79,6 +85,7 @@ export async function executePipeline(
   onProgress("planning", 10, 0, plan.estimatedTotalFrames)
 
   // Pre-render text segments to PNG files
+  console.log(`[pipeline] Pre-rendering text segments... segments=${plan.segments.length}`)
   const textImagePaths = await renderTextSegmentsToFiles(
     plan.segments,
     outputTarget.resolution.width,
@@ -86,8 +93,10 @@ export async function executePipeline(
     config.tempDir,
     job.id,
   )
+  console.log(`[pipeline] Text segments rendered — count=${textImagePaths.size}`)
 
   // Full encode path: build filter graph and encode
+  console.log("[pipeline] Building filter graph...")
   const graph = buildFilterGraph(plan, probeResults, assetPaths, textImagePaths)
   const outputPath = join(config.tempDir, `${job.id}.${outputTarget.format}`)
 
@@ -101,11 +110,14 @@ export async function executePipeline(
   }
 
   onProgress("encoding", 12, 0, plan.estimatedTotalFrames)
+  console.log(`[pipeline] Spawning FFmpeg for jobId=${job.id}...`)
 
   const result = await runFfmpeg(args, job, (frames, _fps, _time) => {
     const pct = 12 + Math.min(80, Math.floor((frames / plan.estimatedTotalFrames) * 80))
     onProgress("encoding", pct, frames, plan.estimatedTotalFrames)
   }, abortSignal)
+
+  console.log(`[pipeline] FFmpeg finished — exitCode=${result.exitCode}, error=${result.error ?? "none"}`)
 
   if (result.error || result.exitCode !== 0) {
     const stderrTail = result.stderr ? result.stderr.slice(-2000) : ""
@@ -116,5 +128,6 @@ export async function executePipeline(
   }
 
   onProgress("finalizing", 98, plan.estimatedTotalFrames, plan.estimatedTotalFrames)
+  console.log(`[pipeline] Pipeline completed for jobId=${job.id}`)
   return { success: true, outputFilePath: outputPath, error: null, framesProcessed: plan.estimatedTotalFrames }
 }

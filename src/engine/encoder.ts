@@ -19,7 +19,7 @@ export interface EncoderResult {
 
 export async function runFfmpeg(
   args: string[],
-  _job: ExportJob,
+  job: ExportJob,
   onProgress: (framesProcessed: number, fps: number, timeS: number) => void,
   abortSignal?: AbortSignal,
 ): Promise<EncoderResult> {
@@ -31,6 +31,9 @@ export async function runFfmpeg(
 </fontconfig>`
   const fontconfigPath = join(fontconfigDir, "fonts.conf")
   writeFileSync(fontconfigPath, fontconfigContent)
+
+  console.log(`[encoder] jobId=${job.id} — FFmpeg args: ${args.join(" ")}`)
+  console.log(`[encoder] jobId=${job.id} — FONTCONFIG_FILE=${fontconfigPath}`)
 
   return new Promise((resolve) => {
     const ffmpegPath = config.ffmpegPath
@@ -47,12 +50,31 @@ export async function runFfmpeg(
     let lastFps = 0
     let lastTime = 0
     let stderrBuffer = ""
+    let lastDataTime = Date.now()
+    let hasLoggedStart = false
+
+    // Defensive timeout: if FFmpeg produces no stderr data in 60s, kill it.
+    // This prevents jobs from hanging silently.
+    const timeoutMs = 60000
+    const timeoutCheck = setInterval(() => {
+      const elapsed = Date.now() - lastDataTime
+      if (elapsed > timeoutMs) {
+        console.error(`[encoder] jobId=${job.id} — Timeout: no stderr data for ${elapsed}ms. Killing FFmpeg.`)
+        child.kill("SIGKILL")
+      }
+    }, 5000)
 
     child.stdout?.on("data", () => {
       // Discard stdout
     })
 
     child.stderr?.on("data", (data: Buffer) => {
+      lastDataTime = Date.now()
+      if (!hasLoggedStart) {
+        hasLoggedStart = true
+        console.log(`[encoder] jobId=${job.id} — FFmpeg started producing stderr data`)
+      }
+
       const chunk = data.toString()
       stderrBuffer += chunk
       const lines = chunk.split("\n")
@@ -79,11 +101,14 @@ export async function runFfmpeg(
 
     if (abortSignal) {
       abortSignal.addEventListener("abort", () => {
+        console.log(`[encoder] jobId=${job.id} — Abort signal received, killing FFmpeg`)
         child.kill("SIGKILL")
       })
     }
 
     child.on("close", (code, signal) => {
+      clearInterval(timeoutCheck)
+      console.log(`[encoder] jobId=${job.id} — FFmpeg closed — exitCode=${code}, signal=${signal}, frames=${lastFrames}, fps=${lastFps}`)
       resolve({
         exitCode: code,
         signal: signal,
@@ -93,6 +118,8 @@ export async function runFfmpeg(
     })
 
     child.on("error", (err) => {
+      clearInterval(timeoutCheck)
+      console.error(`[encoder] jobId=${job.id} — FFmpeg spawn error: ${err.message}`)
       resolve({
         exitCode: null,
         signal: null,

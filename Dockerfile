@@ -29,7 +29,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     librsvg2-2 \
     ffmpeg \
     fonts-liberation \
+    fontconfig \
     && rm -rf /var/lib/apt/lists/*
+
+# Verify FFmpeg works and print version for build logs
+RUN ffmpeg -version | head -n 1
+
+# Verify fonts exist and build font cache
+RUN fc-list | grep -i liberation | head -n 5 || echo "Warning: no liberation fonts found"
+RUN fc-cache -fv
 
 WORKDIR /app
 
@@ -38,9 +46,10 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=builder /app/dist ./dist
 
-RUN mkdir -p /app/tmp && chown -R node:node /app/tmp
+RUN mkdir -p /app/tmp && chmod -R 777 /app/tmp
 
-USER node
+# Do NOT switch to USER node — Railway ephemeral volumes and some native
+# modules behave more reliably as root in containerized environments.
 
 EXPOSE 3001
 

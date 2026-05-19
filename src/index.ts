@@ -8,6 +8,15 @@ import { detectGpuCapabilities } from "./engine/gpuDetector.js"
 const app = express()
 const PORT = config.port
 
+// Global error handlers — prevent silent crashes
+process.on("unhandledRejection", (reason) => {
+  console.error("[AloMediaServer] Unhandled rejection:", reason)
+})
+
+process.on("uncaughtException", (err) => {
+  console.error("[AloMediaServer] Uncaught exception:", err)
+})
+
 async function start() {
   await ensureTempDir()
 
@@ -32,13 +41,19 @@ async function start() {
     cleanupOldFiles().catch(() => {})
   }, 60000)
 
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`[AloMediaServer] Export server running on port ${PORT}`)
     console.log(`[AloMediaServer] GPU acceleration: ${gpu.nvenc ? "NVENC" : gpu.qsv ? "QuickSync" : "CPU only"}`)
     console.log(`[AloMediaServer] Selected encoder: ${gpu.selectedEncoder}`)
     console.log(`[AloMediaServer] Max concurrent jobs: ${config.maxConcurrentJobs}`)
     console.log(`[AloMediaServer] Temp directory: ${config.tempDir}`)
+    console.log(`[AloMediaServer] CORS origins: ${config.corsOrigins.join(", ")}`)
   })
+
+  // prevent long-running connections from hanging forever
+  server.timeout = 300000 // 5 minutes
+  server.keepAliveTimeout = 65000
+  server.headersTimeout = 66000
 }
 
 start().catch((err) => {

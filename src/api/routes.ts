@@ -65,6 +65,20 @@ exportRouter.get("/test-ffmpeg", async (_req: Request, res: Response) => {
   })
 })
 
+exportRouter.post("/test-upload", upload.any(), (req: Request, res: Response) => {
+  const files = req.files as Express.Multer.File[] | undefined
+  const body = req.body
+  const fileCount = Array.isArray(files) ? files.length : 0
+  const totalSize = Array.isArray(files) ? files.reduce((sum, f) => sum + f.size, 0) : 0
+  console.log(`[test-upload] Received upload — files=${fileCount}, totalSize=${totalSize}, bodyKeys=${Object.keys(body || {}).join(",")}`)
+  res.json({
+    ok: true,
+    fileCount,
+    totalSize,
+    bodyKeys: Object.keys(body || {}),
+  })
+})
+
 exportRouter.post("/export", (req: Request, _res: Response, next: () => void) => {
   console.log(`[export] Incoming request — content-type=${req.get("content-type") ?? "unknown"}, content-length=${req.get("content-length") ?? "unknown"}`)
   next()

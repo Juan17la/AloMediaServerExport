@@ -5,20 +5,32 @@ import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
 
+const CPU_ONLY: GpuCapabilities = {
+  nvenc: false,
+  qsv: false,
+  vaapi: false,
+  selectedEncoder: "libx264",
+  selectedCodec: "h264",
+}
+
 let cachedCapabilities: GpuCapabilities | null = null
 
-async function checkEncoderAvailable(encoder: string): Promise<boolean> {
+async function checkEncoderAvailable(encoder: string, timeoutMs: number = 5000): Promise<boolean> {
   try {
-    const { stdout } = await execFileAsync(config.ffmpegPath, ["-hide_banner", "-encoders"])
+    const { stdout } = await execFileAsync(config.ffmpegPath, ["-hide_banner", "-encoders"], {
+      timeout: timeoutMs,
+    })
     return stdout.includes(encoder)
   } catch {
     return false
   }
 }
 
-async function checkHwAccelAvailable(hwAccel: string): Promise<boolean> {
+async function checkHwAccelAvailable(hwAccel: string, timeoutMs: number = 5000): Promise<boolean> {
   try {
-    const { stdout } = await execFileAsync(config.ffmpegPath, ["-hide_banner", "-hwaccels"])
+    const { stdout } = await execFileAsync(config.ffmpegPath, ["-hide_banner", "-hwaccels"], {
+      timeout: timeoutMs,
+    })
     return stdout.includes(hwAccel)
   } catch {
     return false
@@ -27,6 +39,16 @@ async function checkHwAccelAvailable(hwAccel: string): Promise<boolean> {
 
 export async function detectGpuCapabilities(): Promise<GpuCapabilities> {
   if (cachedCapabilities) return cachedCapabilities
+
+  // If GPU is explicitly disabled, skip detection entirely to avoid
+  // hanging on ghost NVIDIA drivers in cloud containers.
+  if (!config.enableGpu) {
+    console.log("[gpuDetector] ENABLE_GPU=false — forcing CPU-only encoding (libx264)")
+    cachedCapabilities = { ...CPU_ONLY }
+    return cachedCapabilities
+  }
+
+  console.log("[gpuDetector] Detecting GPU capabilities...")
 
   const [nvenc, qsv, vaapi, cuda, qsvHwAccel] = await Promise.all([
     checkEncoderAvailable("h264_nvenc"),
@@ -57,6 +79,8 @@ export async function detectGpuCapabilities(): Promise<GpuCapabilities> {
     selectedEncoder,
     selectedCodec,
   }
+
+  console.log(`[gpuDetector] Detected: nvenc=${nvenc}, qsv=${qsv}, vaapi=${vaapi}, cuda=${cuda}, selectedEncoder=${selectedEncoder}`)
 
   return cachedCapabilities
 }

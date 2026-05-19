@@ -4,7 +4,6 @@ import { exportRouter } from "./api/routes.js"
 import { setupMiddleware } from "./api/middleware.js"
 import { ensureTempDir, cleanupOldFiles } from "./storage/assetStore.js"
 import { detectGpuCapabilities } from "./engine/gpuDetector.js"
-import { invalidateGpuCache } from "./engine/gpuDetector.js"
 
 const app = express()
 const PORT = config.port

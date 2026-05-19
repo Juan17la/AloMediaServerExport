@@ -17,7 +17,7 @@ export async function saveUploadedAsset(jobId: string, mediaId: string, buffer: 
   return filePath
 }
 
-export async function getOutputPath(jobId: string, format: string): string {
+export function getOutputPath(jobId: string, format: string): string {
   return join(config.tempDir, "outputs", `${jobId}.${format}`)
 }
 

@@ -4,10 +4,8 @@ import { config } from "../config.js"
 import { JobQueue, createJobId } from "../queue/jobQueue.js"
 import type { ExportJob, RenderPlan } from "../types.js"
 import { executePipeline } from "../engine/pipeline.js"
-import { detectGpuCapabilities } from "../engine/gpuDetector.js"
-import { ensureTempDir, saveUploadedAsset, getOutputPath, cleanupJobFiles } from "../storage/assetStore.js"
+import { saveUploadedAsset, cleanupJobFiles } from "../storage/assetStore.js"
 import { stat, readFile } from "node:fs/promises"
-import { join } from "node:path"
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 500 * 1024 * 1024 } })
 
@@ -66,7 +64,12 @@ exportRouter.post("/export", upload.any(), async (req: Request, res: Response) =
 })
 
 exportRouter.get("/export/:id/status", async (req: Request, res: Response) => {
-  const job = jobs.get(req.params.id)
+  const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id
+  if (!id) {
+    res.status(400).json({ error: "Missing id" })
+    return
+  }
+  const job = jobs.get(id)
   if (!job) {
     res.status(404).json({ error: "Job not found" })
     return
@@ -82,7 +85,12 @@ exportRouter.get("/export/:id/status", async (req: Request, res: Response) => {
 })
 
 exportRouter.get("/export/:id/download", async (req: Request, res: Response) => {
-  const job = jobs.get(req.params.id)
+  const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id
+  if (!id) {
+    res.status(400).json({ error: "Missing id" })
+    return
+  }
+  const job = jobs.get(id)
   if (!job) {
     res.status(404).json({ error: "Job not found" })
     return
@@ -107,7 +115,12 @@ exportRouter.get("/export/:id/download", async (req: Request, res: Response) => 
 })
 
 exportRouter.delete("/export/:id", async (req: Request, res: Response) => {
-  const job = jobs.get(req.params.id)
+  const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id
+  if (!id) {
+    res.status(400).json({ error: "Missing id" })
+    return
+  }
+  const job = jobs.get(id)
   if (!job) {
     res.status(404).json({ error: "Job not found" })
     return
@@ -120,7 +133,7 @@ exportRouter.delete("/export/:id", async (req: Request, res: Response) => {
   }
 
   await cleanupJobFiles(job.id)
-  jobs.delete(req.params.id)
+  jobs.delete(id)
   res.json({ cancelled: true })
 })
 

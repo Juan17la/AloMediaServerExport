@@ -33,7 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Verify FFmpeg works and print version for build logs
-RUN ffmpeg -version | head -n 1
+RUN which ffmpeg && ffmpeg -version | head -n 1
 
 # Verify fonts exist and build font cache
 RUN fc-list | grep -i liberation | head -n 5 || echo "Warning: no liberation fonts found"
@@ -46,7 +46,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=builder /app/dist ./dist
 
-RUN mkdir -p /app/tmp && chmod -R 777 /app/tmp
+RUN mkdir -p /app/tmp/assets /app/tmp/outputs /app/tmp/uploads && chmod -R 777 /app/tmp
 
 # Do NOT switch to USER node — Railway ephemeral volumes and some native
 # modules behave more reliably as root in containerized environments.

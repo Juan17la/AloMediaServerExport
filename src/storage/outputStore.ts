@@ -1,1 +1,1 @@
-export { ensureTempDir, saveUploadedAsset, getOutputPath, cleanupOldFiles, cleanupJobFiles } from "./assetStore.js"
+export { ensureTempDir, getOutputPath, cleanupOldFiles, cleanupJobFiles } from "./assetStore.js"

@@ -1,20 +1,12 @@
 import { config } from "../config.js"
-import { mkdir, readdir, stat, unlink } from "node:fs/promises"
+import { mkdir, readdir, stat, unlink, rm } from "node:fs/promises"
 import { join } from "node:path"
 
 export async function ensureTempDir(): Promise<void> {
   await mkdir(config.tempDir, { recursive: true })
   await mkdir(join(config.tempDir, "assets"), { recursive: true })
   await mkdir(join(config.tempDir, "outputs"), { recursive: true })
-}
-
-export async function saveUploadedAsset(jobId: string, mediaId: string, buffer: Buffer, originalName: string): Promise<string> {
-  const ext = originalName.split(".").pop() ?? "mp4"
-  const fileName = `job_${jobId}_media_${mediaId}.${ext}`
-  const filePath = join(config.tempDir, "assets", fileName)
-  const { writeFile } = await import("node:fs/promises")
-  await writeFile(filePath, buffer)
-  return filePath
+  await mkdir(join(config.tempDir, "uploads"), { recursive: true })
 }
 
 export function getOutputPath(jobId: string, format: string): string {
@@ -25,7 +17,7 @@ export async function cleanupOldFiles(): Promise<number> {
   const now = Date.now()
   let cleaned = 0
 
-  for (const subdir of ["assets", "outputs"]) {
+  for (const subdir of ["assets", "outputs", "uploads"]) {
     const dir = join(config.tempDir, subdir)
     try {
       const entries = await readdir(dir)
@@ -46,14 +38,12 @@ export async function cleanupOldFiles(): Promise<number> {
 }
 
 export async function cleanupJobFiles(jobId: string): Promise<void> {
-  const { readdir, unlink } = await import("node:fs/promises")
-
-  for (const subdir of ["assets", "outputs"]) {
+  for (const subdir of ["assets", "outputs", "uploads"]) {
     const dir = join(config.tempDir, subdir)
     try {
       const entries = await readdir(dir)
       for (const entry of entries) {
-        if (entry.startsWith(`job_${jobId}`)) {
+        if (entry.startsWith(`job_${jobId}`) || entry.includes(jobId)) {
           await unlink(join(dir, entry)).catch(() => {})
         }
       }
@@ -62,10 +52,9 @@ export async function cleanupJobFiles(jobId: string): Promise<void> {
     }
   }
 
-  // Clean up segment directories
+  // Clean up segment/text directories
   const segmentsDir = join(config.tempDir, `job_${jobId}`)
   try {
-    const { rm } = await import("node:fs/promises")
     await rm(segmentsDir, { recursive: true, force: true })
   } catch {
     // Ignore errors

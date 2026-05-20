@@ -53,8 +53,13 @@ export function buildServerCommand(
 
   // Limit threads to reduce memory pressure and prevent multi-threaded
   // filter graph negotiation issues that cause reinitialization failures.
-  args.push("-threads", "2")
+  // On Railway hobby plans (512 MB RAM), a single thread is safer.
+  args.push("-threads", "1")
   args.push("-filter_complex_threads", "1")
+
+  // Cap FFmpeg's internal allocations so it fails gracefully with ENOMEM
+  // instead of being killed by the kernel OOM killer (SIGKILL).
+  args.push("-max_alloc", "200M")
 
   // Note: -hwaccel flags are intentionally omitted. When using -filter_complex,
   // FFmpeg operates in software. GPU encoding (h264_nvenc/h264_qsv) still works

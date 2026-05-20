@@ -79,13 +79,14 @@ export function buildFilterGraph(
   probeResults: Map<string, MediaProbeResult>,
   filePaths: Map<string, string>,
   textImagePaths: Map<string, string> = new Map(),
+  overrideProjectDuration?: number,
 ): FilterGraphResult {
   const { segments, transitions, outputTarget } = plan
   const { width: targetW, height: targetH } = outputTarget.resolution
 
   // Total project duration — every track must be padded to this length
   // so that clips ending early don't freeze their last opaque frame.
-  const projectDuration = Math.max(0, ...segments.map(s => s.timelineEnd))
+  const projectDuration = overrideProjectDuration ?? Math.max(0, ...segments.map(s => s.timelineEnd))
   const targetFps = outputTarget.fps
 
   // Scale pixel coordinates from the 1280x720 editor canvas to the output resolution.

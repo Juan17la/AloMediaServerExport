@@ -1,12 +1,12 @@
 import type { RenderPlan, ExportJob } from "../types.js"
 import { config } from "../config.js"
 import { detectGpuCapabilities } from "./gpuDetector.js"
-import { buildServerCommand, buildStreamCopyCommand } from "./commandBuilder.js"
-import { buildFilterGraph } from "./filterGraphBuilder.js"
+import { buildStreamCopyCommand } from "./commandBuilder.js"
 import { runFfmpeg } from "./encoder.js"
 import { join } from "node:path"
 import { probeMediaFile } from "./probe.js"
 import { renderTextSegmentsToFiles } from "./textRenderer.js"
+import { executeChunkedEncode } from "./chunkedEncoder.js"
 
 export interface PipelineResult {
   success: boolean
@@ -76,6 +76,8 @@ export async function executePipeline(
         console.log("[pipeline] Stream copy was aborted (job cancelled)")
       } else if (result.killedByTimeout) {
         console.error("[pipeline] Stream copy was killed due to timeout")
+      } else if (result.signal === "SIGKILL") {
+        console.error("[pipeline] Stream copy was killed by SIGKILL — likely out of memory")
       } else {
         console.error("[pipeline] Stream copy failed with exit code:", result.exitCode)
         console.error("[pipeline] FFmpeg stderr (last 2000 chars):", stderrTail)
@@ -101,45 +103,23 @@ export async function executePipeline(
   )
   console.log(`[pipeline] Text segments rendered — count=${textImagePaths.size}`)
 
-  // Full encode path: build filter graph and encode
-  console.log("[pipeline] Building filter graph...")
-  const graph = buildFilterGraph(plan, probeResults, assetPaths, textImagePaths)
-  const outputPath = join(config.tempDir, `${job.id}.${outputTarget.format}`)
+  const result = await executeChunkedEncode(
+    job,
+    plan,
+    probeResults,
+    assetPaths,
+    textImagePaths,
+    gpuCodec,
+    onProgress,
+    abortSignal,
+  )
 
-  const encodingPreset = "fast"
-  const args = buildServerCommand(graph, plan, outputPath, gpuCodec, encodingPreset)
-
-  console.log("[pipeline] Full encode path. Filter graph inputs:", graph.inputArgs.length, "Filter length:", graph.filterComplex.length)
-  console.log("[pipeline] FFmpeg command:", args.join(" "))
-  if (graph.filterComplex.length > 0) {
-    console.log("[pipeline] Filter complex:\n", graph.filterComplex)
-  }
-
-  onProgress("encoding", 12, 0, plan.estimatedTotalFrames)
-  console.log(`[pipeline] Spawning FFmpeg for jobId=${job.id}...`)
-
-  const result = await runFfmpeg(args, job, (frames, _fps, _time) => {
-    const pct = 12 + Math.min(80, Math.floor((frames / plan.estimatedTotalFrames) * 80))
-    onProgress("encoding", pct, frames, plan.estimatedTotalFrames)
-  }, abortSignal)
-
-  console.log(`[pipeline] FFmpeg finished — exitCode=${result.exitCode}, error=${result.error ?? "none"}`)
-
-  if (result.error || result.exitCode !== 0) {
-    const stderrTail = result.stderr ? result.stderr.slice(-2000) : ""
-    if (result.killedByAbort) {
-      console.log("[pipeline] FFmpeg was aborted (job cancelled)")
-    } else if (result.killedByTimeout) {
-      console.error("[pipeline] FFmpeg was killed due to timeout")
-    } else {
-      console.error("[pipeline] FFmpeg failed with exit code:", result.exitCode)
-      console.error("[pipeline] FFmpeg stderr (last 2000 chars):", stderrTail)
-    }
-    const errorDetail = result.error ?? `FFmpeg exited with code ${result.exitCode}`
-    return { success: false, outputFilePath: null, error: result.killedByAbort ? "Export was cancelled" : `${errorDetail}\n${stderrTail}`, framesProcessed: 0 }
+  if (!result.success) {
+    console.error(`[pipeline] jobId=${job.id} failed — ${result.error ?? "Unknown error"}`)
+    return { success: false, outputFilePath: null, error: result.error ?? "Encoding failed", framesProcessed: result.framesProcessed }
   }
 
   onProgress("finalizing", 98, plan.estimatedTotalFrames, plan.estimatedTotalFrames)
   console.log(`[pipeline] Pipeline completed for jobId=${job.id}`)
-  return { success: true, outputFilePath: outputPath, error: null, framesProcessed: plan.estimatedTotalFrames }
+  return { success: true, outputFilePath: result.outputFilePath, error: null, framesProcessed: result.framesProcessed }
 }

@@ -141,9 +141,11 @@ export async function runFfmpeg(
         ? "FFmpeg was aborted (job cancelled)"
         : killedByTimeout
           ? "FFmpeg was killed due to timeout"
-          : code !== 0
-            ? `FFmpeg exited with code ${code}`
-            : null
+          : signal === "SIGKILL"
+            ? "FFmpeg was killed by the system (likely out of memory)"
+            : code !== 0
+              ? `FFmpeg exited with code ${code}`
+              : null
       resolve({
         exitCode: code,
         signal: signal,

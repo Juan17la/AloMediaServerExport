@@ -48,6 +48,14 @@ COPY --from=builder /app/dist ./dist
 
 RUN mkdir -p /app/tmp && chmod -R 777 /app/tmp
 
+# Create a 1 GB swapfile to survive memory spikes on hobby plans.
+# Railway hobby containers have ~512 MB RAM; swap gives FFmpeg headroom
+# before the OOM killer fires.
+RUN fallocate -l 1G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=1024 && \
+    chmod 600 /swapfile && \
+    mkswap /swapfile && \
+    swapon /swapfile || echo "Swap setup failed (expected in some environments)"
+
 # Do NOT switch to USER node — Railway ephemeral volumes and some native
 # modules behave more reliably as root in containerized environments.
 

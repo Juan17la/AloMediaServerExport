@@ -5,7 +5,8 @@ import { JobQueue, createJobId } from "../queue/jobQueue.js"
 import type { ExportJob, RenderPlan } from "../types.js"
 import { executePipeline } from "../engine/pipeline.js"
 import { saveUploadedAsset, cleanupJobFiles } from "../storage/assetStore.js"
-import { stat, readFile } from "node:fs/promises"
+import { stat } from "node:fs/promises"
+import { createReadStream } from "node:fs"
 import { spawn } from "node:child_process"
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 500 * 1024 * 1024 } })
@@ -14,6 +15,22 @@ const queue = new JobQueue(config.maxConcurrentJobs)
 const jobs = new Map<string, ExportJob>()
 
 export const exportRouter = Router()
+export { queue }
+
+export function shutdownExports(): void {
+  console.log("[export] Shutting down — aborting active and pending jobs")
+  for (const job of jobs.values()) {
+    if (job.status === "encoding" || job.status === "pending" || job.status === "probing") {
+      if (job.abortController) {
+        console.log(`[export] Aborting job ${job.id} due to shutdown`)
+        job.abortController.abort()
+      }
+      job.status = "cancelled"
+      job.completedAt = Date.now()
+    }
+  }
+  queue.clear()
+}
 
 exportRouter.get("/test-ffmpeg", async (_req: Request, res: Response) => {
   console.log("[test-ffmpeg] Running FFmpeg diagnostic...")
@@ -166,8 +183,14 @@ exportRouter.get("/export/:id/download", async (req: Request, res: Response) => 
     res.setHeader("Content-Type", getMimeType(job.plan?.outputTarget.format ?? "mp4"))
     res.setHeader("Content-Disposition", `attachment; filename="export_${job.id}.${job.plan?.outputTarget.format ?? "mp4"}"`)
 
-    const fileBuffer = await readFile(job.outputFilePath)
-    res.send(fileBuffer)
+    const stream = createReadStream(job.outputFilePath)
+    stream.on("error", (err) => {
+      console.error(`[download] Stream error for job ${job.id}:`, err)
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Failed to read output file" })
+      }
+    })
+    stream.pipe(res)
   } catch {
     res.status(500).json({ error: "Failed to read output file" })
   }
@@ -263,8 +286,11 @@ async function processJob(jobId: string, plan: RenderPlan, files: Express.Multer
   } finally {
     queue.markCompleted(jobId)
     console.log(`[processJob] jobId=${jobId} finished, activeJobs=${queue.getActiveCount()}`)
-    // Clean up asset files after a delay
-    setTimeout(() => cleanupJobFiles(jobId), config.cleanupAgeMs)
+    // Clean up asset files and job metadata after a delay
+    setTimeout(() => {
+      cleanupJobFiles(jobId).catch(() => {})
+      jobs.delete(jobId)
+    }, config.cleanupAgeMs)
   }
 }
 

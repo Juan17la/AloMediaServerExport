@@ -1,0 +1,12 @@
+node_modules
+dist
+tmp
+.git
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+.vscode
+.idea
+railway.toml

@@ -1,7 +1,7 @@
 import { config } from "../config.js"
 import type { ExportJob } from "../types.js"
 import { spawn, type ChildProcess } from "node:child_process"
-import { writeFileSync, mkdtempSync } from "node:fs"
+import { writeFileSync, mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
@@ -21,6 +21,7 @@ export interface EncoderResult {
 
 const STARTUP_TIMEOUT_MS = 120_000
 const OVERALL_TIMEOUT_MS = config.jobTimeoutMs || 1_800_000
+const MAX_STDERR_BUFFER = 50_000
 
 export async function runFfmpeg(
   args: string[],
@@ -39,6 +40,14 @@ export async function runFfmpeg(
 
   console.log(`[encoder] jobId=${job.id} — FFmpeg args: ${args.join(" ")}`)
   console.log(`[encoder] jobId=${job.id} — FONTCONFIG_FILE=${fontconfigPath}`)
+
+  function cleanupFontconfig() {
+    try {
+      rmSync(fontconfigDir, { recursive: true, force: true })
+    } catch {
+      // ignore cleanup failures
+    }
+  }
 
   return new Promise((resolve) => {
     const ffmpegPath = config.ffmpegPath
@@ -97,6 +106,9 @@ export async function runFfmpeg(
     child.stderr?.on("data", (data: Buffer) => {
       const chunk = data.toString()
       stderrBuffer += chunk
+      if (stderrBuffer.length > MAX_STDERR_BUFFER) {
+        stderrBuffer = stderrBuffer.slice(-MAX_STDERR_BUFFER)
+      }
       const lines = chunk.split("\n")
       for (const line of lines) {
         if (PROGRESS_REGEX.test(line)) {
@@ -123,6 +135,7 @@ export async function runFfmpeg(
     child.on("close", (code, signal) => {
       clearInterval(startupCheck)
       clearTimeout(overallTimeout)
+      cleanupFontconfig()
       console.log(`[encoder] jobId=${job.id} — FFmpeg closed — exitCode=${code}, signal=${signal}, frames=${lastFrames}, fps=${lastFps}`)
       const errorDetail = killedByAbort
         ? "FFmpeg was aborted (job cancelled)"
@@ -144,6 +157,7 @@ export async function runFfmpeg(
     child.on("error", (err) => {
       clearInterval(startupCheck)
       clearTimeout(overallTimeout)
+      cleanupFontconfig()
       console.error(`[encoder] jobId=${job.id} — FFmpeg spawn error: ${err.message}`)
       resolve({
         exitCode: null,

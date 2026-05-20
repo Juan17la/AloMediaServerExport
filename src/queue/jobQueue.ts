@@ -88,6 +88,13 @@ export class JobQueue {
     this.processQueue()
   }
 
+  clear(): void {
+    for (const entry of this.queue) {
+      entry.reject(new Error("Server is shutting down"))
+    }
+    this.queue = []
+  }
+
   private processQueue(): void {
     if (this.processing) return
     if (this.activeJobs.size >= this.maxConcurrent) return

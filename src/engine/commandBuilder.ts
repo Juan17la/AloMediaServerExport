@@ -44,7 +44,7 @@ export function buildServerCommand(
   encodingPreset: string,
 ): string[] {
   const { outputTarget } = plan
-  const args: string[] = ["-y"]
+  const args: string[] = ["-y", "-nostdin"]
 
   // Use consistent scaling algorithm for all sws operations (including
   // auto-inserted scale filters) to prevent "Failed to configure
@@ -137,7 +137,7 @@ export function buildStreamCopyCommand(
   duration: number,
   format: string,
 ): string[] {
-  const args: string[] = ["-y"]
+  const args: string[] = ["-y", "-nostdin"]
 
   if (seekStart > 0.001) {
     args.push("-ss", seekStart.toFixed(3))

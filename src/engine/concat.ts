@@ -1,6 +1,6 @@
 import { config } from "../config.js"
 import { spawn } from "node:child_process"
-import { readFile, writeFile, stat } from "node:fs/promises"
+import { copyFile, writeFile, stat } from "node:fs/promises"
 import { join, resolve } from "node:path"
 
 export async function concatenateSegments(
@@ -29,8 +29,7 @@ export async function concatenateSegments(
   }
 
   if (resolvedFiles.length === 1) {
-    const data = await readFile(resolvedFiles[0])
-    await writeFile(outputFile, data)
+    await copyFile(resolvedFiles[0], outputFile)
     return
   }
 
@@ -53,13 +52,20 @@ export async function concatenateSegments(
     })
 
     let stderr = ""
+    const MAX_STDERR = 10_000
     child.stderr?.on("data", (data: Buffer) => {
       stderr += data.toString()
+      if (stderr.length > MAX_STDERR) {
+        stderr = stderr.slice(-MAX_STDERR)
+      }
     })
 
-    child.on("close", (code) => {
-      // Clean up concat list
+    const cleanupConcatList = () => {
       import("node:fs").then((fs) => fs.promises.unlink(concatListPath).catch(() => {}))
+    }
+
+    child.on("close", (code) => {
+      cleanupConcatList()
       if (code === 0) {
         resolve()
       } else {
@@ -68,6 +74,7 @@ export async function concatenateSegments(
     })
 
     child.on("error", (err) => {
+      cleanupConcatList()
       reject(err)
     })
   })

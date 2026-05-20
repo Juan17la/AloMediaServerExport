@@ -64,6 +64,16 @@ function isIdentityColor(adj: RenderSegment["colorAdjustments"]): boolean {
   )
 }
 
+function computeRotatedDimensions(w: number, h: number, rotationDeg: number): { width: number; height: number } {
+  const a = rotationDeg * Math.PI / 180
+  const cosA = Math.abs(Math.cos(a))
+  const sinA = Math.abs(Math.sin(a))
+  return {
+    width: Math.ceil(w * cosA + h * sinA),
+    height: Math.ceil(w * sinA + h * cosA),
+  }
+}
+
 export function buildFilterGraph(
   plan: RenderPlan,
   probeResults: Map<string, MediaProbeResult>,
@@ -246,12 +256,12 @@ export function buildFilterGraph(
     const outLabel = nextLabel("segv")
 
     if (seg.type === "text" && textSegmentsWithPng.has(seg.id)) {
-      // Text with pre-rendered PNG: treat as image input
+      // Text with pre-rendered PNG: treat as image input.
+      // PNGs are pre-rendered at target resolution so no scaling/padding needed.
       const sourceLabel = getVideoSourceLabel(seg.id)
       const filters: string[] = []
       filters.push("format=rgba")
       filters.push("setpts=PTS-STARTPTS")
-      filters.push(`format=rgba,scale=${targetW}:${targetH}:force_original_aspect_ratio=decrease,pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2:color=black@0`)
       filters.push(`fps=${targetFps},setpts=PTS-STARTPTS,setsar=1:1`)
       filterParts.push(`[${sourceLabel}]${filters.join(",")}[${outLabel}]`)
       segVideoLabels.set(seg.id, outLabel)
@@ -277,6 +287,13 @@ export function buildFilterGraph(
     const probe = probeResults.get(seg.mediaId)
     const sourceLabel = getVideoSourceLabel(seg.mediaId)
     const filters: string[] = []
+
+    // Track content dimensions through the filter chain to compute explicit
+    // scale parameters. This avoids force_original_aspect_ratio=decrease
+    // which causes FFmpeg's auto_scale to fail during format negotiation
+    // on complex filter graphs.
+    let curW = probe?.width ?? targetW
+    let curH = probe?.height ?? targetH
 
     // Convert to RGBA for alpha-channel compositing between layers.
     // Transparent padding lets lower tracks show through where clips don't fill the canvas.
@@ -312,21 +329,32 @@ export function buildFilterGraph(
           filters.push(
             `scale=${sw}:${sh},rotate=${(t.rotation * Math.PI / 180).toFixed(6)}:ow=rotw(${(t.rotation * Math.PI / 180).toFixed(6)}):oh=roth(${(t.rotation * Math.PI / 180).toFixed(6)}):fillcolor=0x00000000`,
           )
+          const rotated = computeRotatedDimensions(sw, sh, t.rotation)
+          curW = rotated.width
+          curH = rotated.height
         } else {
           filters.push(`scale=${sw}:${sh}`)
+          curW = sw
+          curH = sh
         }
       } else if (Math.abs(t.rotation) > 0.01) {
         filters.push(
           `rotate=${(t.rotation * Math.PI / 180).toFixed(6)}:ow=rotw(${(t.rotation * Math.PI / 180).toFixed(6)}):oh=roth(${(t.rotation * Math.PI / 180).toFixed(6)}):fillcolor=0x00000000`,
         )
+        const rotated = computeRotatedDimensions(curW, curH, t.rotation)
+        curW = rotated.width
+        curH = rotated.height
       }
 
-      // Only add positioning pad when the scaled content fits within the target frame.
+      // Only add positioning pad when the content fits within the target frame.
       // FFmpeg's pad filter requires input dimensions <= output dimensions.
-      const fitsInTarget = sw <= targetW && sh <= targetH
-      const needsPositioning = Math.abs(px) > 0.01 || Math.abs(py) > 0.01 || sw !== targetW || sh !== targetH
+      // Use curW/curH (post-transform dimensions) to correctly handle rotation.
+      const fitsInTarget = curW <= targetW && curH <= targetH
+      const needsPositioning = Math.abs(px) > 0.01 || Math.abs(py) > 0.01 || curW !== targetW || curH !== targetH
       if (fitsInTarget && needsPositioning) {
         filters.push(`pad=${targetW}:${targetH}:${px}:${py}:black@0`)
+        curW = targetW
+        curH = targetH
       }
     }
 
@@ -350,7 +378,24 @@ export function buildFilterGraph(
       if (defFilter) filters.push(defFilter)
     }
 
-    filters.push(`format=rgba,scale=${targetW}:${targetH}:force_original_aspect_ratio=decrease,pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2:color=black@0`)
+    // Final resize: scale content to fit within target dimensions while
+    // preserving aspect ratio, then center-pad to exact target size.
+    // Dimensions are pre-computed to avoid force_original_aspect_ratio=decrease
+    // which causes FFmpeg auto_scale negotiation failures on complex graphs.
+    if (curW > targetW || curH > targetH) {
+      const fitScale = Math.min(targetW / curW, targetH / curH)
+      let fitW = Math.round(curW * fitScale)
+      let fitH = Math.round(curH * fitScale)
+      if (fitW % 2 !== 0) fitW++
+      if (fitH % 2 !== 0) fitH++
+      fitW = Math.min(fitW, targetW)
+      fitH = Math.min(fitH, targetH)
+      filters.push(`scale=${fitW}:${fitH},pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2:color=black@0`)
+    } else if (curW !== targetW || curH !== targetH) {
+      filters.push(`pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2:color=black@0`)
+    } else {
+      filters.push("format=rgba")
+    }
 
     // Normalize fps, timebase, and SAR so all segments are consistent before
     // concat/xfade/overlay operations. Without this, decoded video files carry

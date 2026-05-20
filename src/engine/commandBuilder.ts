@@ -57,16 +57,18 @@ export function buildServerCommand(
   args.push("-threads", "1")
   args.push("-filter_complex_threads", "1")
 
-  // Cap FFmpeg's internal allocations so it fails gracefully with ENOMEM
-  // instead of being killed by the kernel OOM killer (SIGKILL).
-  args.push("-max_alloc", "200M")
-
   // Note: -hwaccel flags are intentionally omitted. When using -filter_complex,
   // FFmpeg operates in software. GPU encoding (h264_nvenc/h264_qsv) still works
   // without hwaccel — it just means software decoding + filtering, then GPU encode.
 
-  for (const inputArg of graph.inputArgs) {
-    args.push(inputArg)
+  // Cap per-input decoder thread queue to prevent FFmpeg from buffering
+  // hundreds of frames ahead per input (major RAM spike on multi-input graphs).
+  for (let i = 0; i < graph.inputArgs.length; i++) {
+    const arg = graph.inputArgs[i]
+    if (arg === "-i") {
+      args.push("-thread_queue_size", "512")
+    }
+    args.push(arg)
   }
 
   if (graph.filterComplex.trim().length > 0) {

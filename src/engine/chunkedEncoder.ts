@@ -14,7 +14,8 @@ export interface ChunkedEncodeResult {
   framesProcessed: number
 }
 
-const DEFAULT_CHUNK_DURATION_S = 120
+const DEFAULT_CHUNK_DURATION_S = 30
+const MIN_CHUNK_SIZE_S = 5
 
 interface TimeChunk {
   start: number
@@ -120,6 +121,108 @@ function buildChunkPlan(originalPlan: RenderPlan, chunkStart: number, chunkEnd: 
   }
 }
 
+interface ChunkTask {
+  start: number
+  end: number
+  outputPath: string
+}
+
+async function encodeChunk(
+  job: ExportJob,
+  plan: RenderPlan,
+  probeResultsMap: Map<string, MediaProbeResult>,
+  assetPaths: Map<string, string>,
+  textImagePaths: Map<string, string>,
+  gpuCodec: string | null,
+  task: ChunkTask,
+  abortSignal?: AbortSignal,
+): Promise<{ success: boolean; outputPath: string | null; error?: string }> {
+  const chunkDuration = task.end - task.start
+
+  const chunkPlan = buildChunkPlan(plan, task.start, task.end)
+
+  if (chunkPlan.segments.length === 0) {
+    // Blank chunk — encode transparent frame with lavfi
+    const blankArgs = [
+      "-y",
+      "-nostdin",
+      "-f", "lavfi",
+      "-i", `color=c=black@0:s=${plan.outputTarget.resolution.width}x${plan.outputTarget.resolution.height}:r=${plan.outputTarget.fps}:d=${chunkDuration.toFixed(3)}`,
+      "-pix_fmt", plan.outputTarget.pixelFormat,
+      "-c:v", gpuCodec || "libx264",
+      "-preset", "ultrafast",
+      "-crf", "30",
+      "-an",
+      task.outputPath,
+    ]
+
+    const result = await runFfmpeg(blankArgs, job, () => {}, abortSignal)
+    if (result.exitCode === 0 && !result.error) {
+      return { success: true, outputPath: task.outputPath }
+    }
+    return { success: false, outputPath: null, error: `Blank chunk [${task.start.toFixed(2)}-${task.end.toFixed(2)}s] failed: ${result.error ?? "unknown error"}` }
+  }
+
+  const graph = buildFilterGraph(
+    chunkPlan,
+    probeResultsMap,
+    assetPaths,
+    textImagePaths,
+    chunkDuration,
+  )
+  const args = buildServerCommand(graph, chunkPlan, task.outputPath, gpuCodec, "fast")
+
+  const result = await runFfmpeg(args, job, () => {}, abortSignal)
+
+  if (result.exitCode === 0 && !result.error) {
+    return { success: true, outputPath: task.outputPath }
+  }
+
+  // OOM auto-retry: if killed by SIGKILL and chunk is still splittable, split in half and retry
+  if (result.signal === "SIGKILL" && chunkDuration > MIN_CHUNK_SIZE_S) {
+    console.log(`[chunkedEncoder] jobId=${job.id} — OOM on chunk [${task.start.toFixed(2)}-${task.end.toFixed(2)}s], splitting in half and retrying...`)
+
+    const mid = task.start + chunkDuration / 2
+    const leftPath = task.outputPath.replace(/(\.[^.]+)$/, `_retry_l$1`)
+    const rightPath = task.outputPath.replace(/(\.[^.]+)$/, `_retry_r$1`)
+
+    const leftResult = await encodeChunk(job, plan, probeResultsMap, assetPaths, textImagePaths, gpuCodec, { start: task.start, end: mid, outputPath: leftPath }, abortSignal)
+    if (!leftResult.success) {
+      await unlink(leftPath).catch(() => {})
+      await unlink(rightPath).catch(() => {})
+      return { success: false, outputPath: null, error: leftResult.error }
+    }
+
+    const rightResult = await encodeChunk(job, plan, probeResultsMap, assetPaths, textImagePaths, gpuCodec, { start: mid, end: task.end, outputPath: rightPath }, abortSignal)
+    if (!rightResult.success) {
+      await unlink(leftPath).catch(() => {})
+      await unlink(rightPath).catch(() => {})
+      return { success: false, outputPath: null, error: rightResult.error }
+    }
+
+    // Concatenate left and right into the expected output path
+    try {
+      await concatenateSegments([leftPath, rightPath], task.outputPath)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      await unlink(leftPath).catch(() => {})
+      await unlink(rightPath).catch(() => {})
+      return { success: false, outputPath: null, error: `Concat after OOM retry failed: ${msg}` }
+    }
+
+    await unlink(leftPath).catch(() => {})
+    await unlink(rightPath).catch(() => {})
+
+    return { success: true, outputPath: task.outputPath }
+  }
+
+  return {
+    success: false,
+    outputPath: null,
+    error: result.error ?? `FFmpeg exited with code ${result.exitCode}`,
+  }
+}
+
 export async function executeChunkedEncode(
   job: ExportJob,
   plan: RenderPlan,
@@ -148,81 +251,33 @@ export async function executeChunkedEncode(
     }
 
     const { start, end } = chunks[i]
-    const chunkDuration = end - start
     console.log(`[chunkedEncoder] jobId=${job.id} — Encoding chunk ${i + 1}/${chunks.length} [${start.toFixed(2)}s - ${end.toFixed(2)}s]`)
 
-    const chunkPlan = buildChunkPlan(plan, start, end)
     const chunkOutputPath = join(config.tempDir, "outputs", `job_${job.id}_chunk_${i}.${outputTarget.format}`)
-    let chunkSuccess = false
+    const encodeResult = await encodeChunk(
+      job,
+      plan,
+      probeResultsMap,
+      assetPaths,
+      textImagePaths,
+      gpuCodec,
+      { start, end, outputPath: chunkOutputPath },
+      abortSignal,
+    )
 
-    if (chunkPlan.segments.length === 0) {
-      // Blank chunk — encode transparent frame with lavfi
-      const blankArgs = [
-        "-y",
-        "-nostdin",
-        "-f", "lavfi",
-        "-i", `color=c=black@0:s=${outputTarget.resolution.width}x${outputTarget.resolution.height}:r=${outputTarget.fps}:d=${chunkDuration.toFixed(3)}`,
-        "-pix_fmt", outputTarget.pixelFormat,
-        "-c:v", gpuCodec ? gpuCodec : "libx264",
-        "-preset", "ultrafast",
-        "-crf", "30",
-        "-an",
-        chunkOutputPath,
-      ]
-
-      const result = await runFfmpeg(blankArgs, job, () => {}, abortSignal)
-      chunkSuccess = result.exitCode === 0 && !result.error
-      if (!chunkSuccess) {
-        return {
-          success: false,
-          outputFilePath: null,
-          error: `Blank chunk ${i + 1} failed: ${result.error ?? "unknown error"}`,
-          framesProcessed: totalFramesProcessed,
-        }
+    if (!encodeResult.success) {
+      // Clean up all intermediate chunk files on failure
+      for (const f of chunkFiles) {
+        await unlink(f).catch(() => {})
       }
-    } else {
-      const graph = buildFilterGraph(
-        chunkPlan,
-        probeResultsMap,
-        assetPaths,
-        textImagePaths,
-        chunkDuration, // override project duration for correct track padding
-      )
-      const args = buildServerCommand(graph, chunkPlan, chunkOutputPath, gpuCodec, "fast")
-
-      console.log(`[chunkedEncoder] jobId=${job.id} — Chunk ${i + 1} inputs=${graph.inputArgs.length} filters=${graph.filterComplex.length} chars`)
-
-      const chunkEstimatedFrames = Math.ceil(chunkDuration * outputTarget.fps)
-      const result = await runFfmpeg(args, job, (frames) => {
-        const overallProgress = Math.min(80, Math.floor(((totalFramesProcessed + frames) / totalFrames) * 80))
-        onProgress("encoding", 12 + overallProgress, totalFramesProcessed + frames, totalFrames)
-      }, abortSignal)
-
-      chunkSuccess = result.exitCode === 0 && !result.error
-      if (!chunkSuccess) {
-        const isOom = result.signal === "SIGKILL"
-        const errorMsg = isOom
-          ? `Chunk ${i + 1}/${chunks.length} failed — server ran out of memory. Try a shorter video or fewer effects.`
-          : `Chunk ${i + 1}/${chunks.length} failed: ${result.error ?? "encoding error"}\n${result.stderr.slice(-1000)}`
-
-        // Clean up all intermediate chunk files on failure
-        for (const f of chunkFiles) {
-          await unlink(f).catch(() => {})
-        }
-        await unlink(chunkOutputPath).catch(() => {})
-
-        return {
-          success: false,
-          outputFilePath: null,
-          error: errorMsg,
-          framesProcessed: totalFramesProcessed,
-        }
-      }
-
-      totalFramesProcessed += chunkEstimatedFrames
+      await unlink(chunkOutputPath).catch(() => {})
+      return { success: false, outputFilePath: null, error: encodeResult.error ?? null, framesProcessed: totalFramesProcessed }
     }
 
-    chunkFiles.push(chunkOutputPath)
+    chunkFiles.push(encodeResult.outputPath!)
+    const chunkEstimatedFrames = Math.ceil((end - start) * outputTarget.fps)
+    totalFramesProcessed += chunkEstimatedFrames
+
     const overallPct = Math.min(98, 12 + Math.floor((chunkFiles.length / chunks.length) * 80))
     onProgress("encoding", overallPct, totalFramesProcessed, totalFrames)
   }
@@ -235,7 +290,6 @@ export async function executeChunkedEncode(
     await concatenateSegments(chunkFiles, outputPath)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    // Clean up on concat failure too
     for (const f of chunkFiles) {
       await unlink(f).catch(() => {})
     }

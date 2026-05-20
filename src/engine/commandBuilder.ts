@@ -110,6 +110,10 @@ export function buildServerCommand(
     args.push("-an")
   }
 
+  // Prevent "Buffer queue overflow" errors in complex filter graphs where
+  // audio and video streams produce data at significantly different rates.
+  args.push("-max_muxing_queue_size", "1024")
+
   args.push("-progress", "pipe:2")
 
   if (outputTarget.format === "mp4") {

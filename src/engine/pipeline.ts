@@ -72,10 +72,16 @@ export async function executePipeline(
 
     if (result.error || result.exitCode !== 0) {
       const stderrTail = result.stderr ? result.stderr.slice(-2000) : ""
-      console.error("[pipeline] Stream copy failed with exit code:", result.exitCode)
-      console.error("[pipeline] FFmpeg stderr (last 2000 chars):", stderrTail)
+      if (result.killedByAbort) {
+        console.log("[pipeline] Stream copy was aborted (job cancelled)")
+      } else if (result.killedByTimeout) {
+        console.error("[pipeline] Stream copy was killed due to timeout")
+      } else {
+        console.error("[pipeline] Stream copy failed with exit code:", result.exitCode)
+        console.error("[pipeline] FFmpeg stderr (last 2000 chars):", stderrTail)
+      }
       const errorDetail = result.error ?? `FFmpeg exited with code ${result.exitCode}`
-      return { success: false, outputFilePath: null, error: `${errorDetail}\n${stderrTail}`, framesProcessed: 0 }
+      return { success: false, outputFilePath: null, error: result.killedByAbort ? "Export was cancelled" : `${errorDetail}\n${stderrTail}`, framesProcessed: 0 }
     }
 
     onProgress("finalizing", 98, plan.estimatedTotalFrames, plan.estimatedTotalFrames)
@@ -121,10 +127,16 @@ export async function executePipeline(
 
   if (result.error || result.exitCode !== 0) {
     const stderrTail = result.stderr ? result.stderr.slice(-2000) : ""
-    console.error("[pipeline] FFmpeg failed with exit code:", result.exitCode)
-    console.error("[pipeline] FFmpeg stderr (last 2000 chars):", stderrTail)
+    if (result.killedByAbort) {
+      console.log("[pipeline] FFmpeg was aborted (job cancelled)")
+    } else if (result.killedByTimeout) {
+      console.error("[pipeline] FFmpeg was killed due to timeout")
+    } else {
+      console.error("[pipeline] FFmpeg failed with exit code:", result.exitCode)
+      console.error("[pipeline] FFmpeg stderr (last 2000 chars):", stderrTail)
+    }
     const errorDetail = result.error ?? `FFmpeg exited with code ${result.exitCode}`
-    return { success: false, outputFilePath: null, error: `${errorDetail}\n${stderrTail}`, framesProcessed: 0 }
+    return { success: false, outputFilePath: null, error: result.killedByAbort ? "Export was cancelled" : `${errorDetail}\n${stderrTail}`, framesProcessed: 0 }
   }
 
   onProgress("finalizing", 98, plan.estimatedTotalFrames, plan.estimatedTotalFrames)

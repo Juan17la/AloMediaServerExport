@@ -143,6 +143,7 @@ export interface ExportJob {
   outputFilePath: string | null
   engine: "native"
   createdAt: number
+  abortController: AbortController | null
 }
 
 export interface FilterGraphResult {

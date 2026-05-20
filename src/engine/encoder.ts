@@ -15,7 +15,12 @@ export interface EncoderResult {
   signal: string | null
   error: string | null
   stderr: string
+  killedByTimeout: boolean
+  killedByAbort: boolean
 }
+
+const STARTUP_TIMEOUT_MS = 120_000
+const OVERALL_TIMEOUT_MS = config.jobTimeoutMs || 1_800_000
 
 export async function runFfmpeg(
   args: string[],
@@ -50,31 +55,46 @@ export async function runFfmpeg(
     let lastFps = 0
     let lastTime = 0
     let stderrBuffer = ""
-    let lastDataTime = Date.now()
-    let hasLoggedStart = false
+    let hasStartedEncoding = false
+    let killedByTimeout = false
+    let killedByAbort = false
+    const startTime = Date.now()
 
-    // Defensive timeout: if FFmpeg produces no stderr data in 60s, kill it.
-    // This prevents jobs from hanging silently.
-    const timeoutMs = 60000
-    const timeoutCheck = setInterval(() => {
-      const elapsed = Date.now() - lastDataTime
-      if (elapsed > timeoutMs) {
-        console.error(`[encoder] jobId=${job.id} — Timeout: no stderr data for ${elapsed}ms. Killing FFmpeg.`)
+    // Startup timeout: kill if FFmpeg produces no progress within the startup period.
+    // Once encoding starts (first frame decoded), this is no longer checked — the
+    // overall timeout takes over to allow slow complex encodes and finalization.
+    const startupCheck = setInterval(() => {
+      if (hasStartedEncoding) return
+      const elapsed = Date.now() - startTime
+      if (elapsed > STARTUP_TIMEOUT_MS) {
+        console.error(`[encoder] jobId=${job.id} — Startup timeout: no frames decoded in ${Math.round(elapsed / 1000)}s. Killing FFmpeg.`)
+        killedByTimeout = true
         child.kill("SIGKILL")
       }
     }, 5000)
+
+    // Overall timeout: kill if FFmpeg has been running longer than the configured
+    // maximum (default 30 minutes). This catches truly hung processes without
+    // interfering with long-but-valid encodes or finalization phases.
+    const overallTimeout = setTimeout(() => {
+      console.error(`[encoder] jobId=${job.id} — Overall timeout: exceeded ${Math.round(OVERALL_TIMEOUT_MS / 1000)}s. Killing FFmpeg.`)
+      killedByTimeout = true
+      child.kill("SIGKILL")
+    }, OVERALL_TIMEOUT_MS)
+
+    if (abortSignal) {
+      abortSignal.addEventListener("abort", () => {
+        console.log(`[encoder] jobId=${job.id} — Abort signal received, killing FFmpeg`)
+        killedByAbort = true
+        child.kill("SIGKILL")
+      })
+    }
 
     child.stdout?.on("data", () => {
       // Discard stdout
     })
 
     child.stderr?.on("data", (data: Buffer) => {
-      lastDataTime = Date.now()
-      if (!hasLoggedStart) {
-        hasLoggedStart = true
-        console.log(`[encoder] jobId=${job.id} — FFmpeg started producing stderr data`)
-      }
-
       const chunk = data.toString()
       stderrBuffer += chunk
       const lines = chunk.split("\n")
@@ -86,6 +106,7 @@ export async function runFfmpeg(
 
           if (frameMatch) {
             lastFrames = parseInt(frameMatch[1], 10)
+            hasStartedEncoding = true
           }
           if (fpsMatch) {
             lastFps = parseFloat(fpsMatch[1]) || 0
@@ -99,32 +120,38 @@ export async function runFfmpeg(
       }
     })
 
-    if (abortSignal) {
-      abortSignal.addEventListener("abort", () => {
-        console.log(`[encoder] jobId=${job.id} — Abort signal received, killing FFmpeg`)
-        child.kill("SIGKILL")
-      })
-    }
-
     child.on("close", (code, signal) => {
-      clearInterval(timeoutCheck)
+      clearInterval(startupCheck)
+      clearTimeout(overallTimeout)
       console.log(`[encoder] jobId=${job.id} — FFmpeg closed — exitCode=${code}, signal=${signal}, frames=${lastFrames}, fps=${lastFps}`)
+      const errorDetail = killedByAbort
+        ? "FFmpeg was aborted (job cancelled)"
+        : killedByTimeout
+          ? "FFmpeg was killed due to timeout"
+          : code !== 0
+            ? `FFmpeg exited with code ${code}`
+            : null
       resolve({
         exitCode: code,
         signal: signal,
-        error: code !== 0 ? `FFmpeg exited with code ${code}` : null,
+        error: errorDetail,
         stderr: stderrBuffer,
+        killedByTimeout,
+        killedByAbort,
       })
     })
 
     child.on("error", (err) => {
-      clearInterval(timeoutCheck)
+      clearInterval(startupCheck)
+      clearTimeout(overallTimeout)
       console.error(`[encoder] jobId=${job.id} — FFmpeg spawn error: ${err.message}`)
       resolve({
         exitCode: null,
         signal: null,
         error: err.message,
         stderr: stderrBuffer,
+        killedByTimeout: false,
+        killedByAbort: false,
       })
     })
   })

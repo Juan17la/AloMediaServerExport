@@ -99,6 +99,7 @@ exportRouter.post("/export", (req: Request, _res: Response, next: () => void) =>
       outputFilePath: null,
       engine: "native",
       createdAt: Date.now(),
+      abortController: null,
     }
 
     jobs.set(jobId, job)
@@ -185,6 +186,10 @@ exportRouter.delete("/export/:id", async (req: Request, res: Response) => {
   }
 
   if (job.status === "encoding" || job.status === "pending") {
+    if (job.abortController) {
+      console.log(`[export] Aborting FFmpeg for jobId=${job.id}`)
+      job.abortController.abort()
+    }
     job.status = "cancelled"
     job.completedAt = Date.now()
     queue.removeJob(job.id)
@@ -221,6 +226,7 @@ async function processJob(jobId: string, plan: RenderPlan, files: Express.Multer
   console.log(`[processJob] Executing pipeline for jobId=${jobId}`)
 
   const abortController = new AbortController()
+  job.abortController = abortController
 
   try {
     const result = await executePipeline(

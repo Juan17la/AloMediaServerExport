@@ -206,8 +206,15 @@ export function buildFilterGraph(
     const streamIdx = info.inputIndex
 
     if (vRefCount > 0) {
+      const probe = probeResults.get(info.mediaId)
+      const srcW = probe?.width ?? targetW
+      const srcH = probe?.height ?? targetH
       const fmtLabel = nextLabel("vfmt")
-      filterParts.push(`[${streamIdx}:v]format=rgba[${fmtLabel}]`)
+      // Explicit scale with probe dimensions forces known output size before
+      // format conversion. This prevents downstream scale filters from failing
+      // to configure their output pads during graph reinitialization (the
+      // "Failed to configure output pad on Parsed_scale_N" error).
+      filterParts.push(`[${streamIdx}:v]scale=${srcW}:${srcH},format=rgba,setsar=1:1[${fmtLabel}]`)
 
       if (vRefCount > 1) {
         const labels: string[] = []
@@ -398,9 +405,13 @@ export function buildFilterGraph(
       if (fitH % 2 !== 0) fitH++
       fitW = Math.min(fitW, targetW)
       fitH = Math.min(fitH, targetH)
-      filters.push(`scale=${fitW}:${fitH},pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2:color=black@0`)
+      const padX = Math.round((targetW - fitW) / 2)
+      const padY = Math.round((targetH - fitH) / 2)
+      filters.push(`scale=${fitW}:${fitH},pad=${targetW}:${targetH}:${padX}:${padY}:color=black@0`)
     } else if (curW !== targetW || curH !== targetH) {
-      filters.push(`pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2:color=black@0`)
+      const padX = Math.round((targetW - curW) / 2)
+      const padY = Math.round((targetH - curH) / 2)
+      filters.push(`pad=${targetW}:${targetH}:${padX}:${padY}:color=black@0`)
     }
     // When curW === targetW && curH === targetH, content already matches
     // the output dimensions. No resize/pad filter needed — the stream is

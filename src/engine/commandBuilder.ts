@@ -51,6 +51,11 @@ export function buildServerCommand(
   // output pad" errors on complex filter graphs.
   args.push("-sws_flags", "lanczos+accurate_rnd")
 
+  // Limit threads to reduce memory pressure and prevent multi-threaded
+  // filter graph negotiation issues that cause reinitialization failures.
+  args.push("-threads", "2")
+  args.push("-filter_complex_threads", "1")
+
   // Note: -hwaccel flags are intentionally omitted. When using -filter_complex,
   // FFmpeg operates in software. GPU encoding (h264_nvenc/h264_qsv) still works
   // without hwaccel — it just means software decoding + filtering, then GPU encode.

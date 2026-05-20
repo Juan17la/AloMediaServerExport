@@ -205,30 +205,18 @@ export function buildFilterGraph(
     const aRefCount = audioRefCount.get(info.mediaId) ?? 0
     const streamIdx = info.inputIndex
 
-    if (vRefCount > 0) {
-      const probe = probeResults.get(info.mediaId)
-      const srcW = probe?.width ?? targetW
-      const srcH = probe?.height ?? targetH
-      const fmtLabel = nextLabel("vfmt")
-      // Explicit scale with probe dimensions forces known output size before
-      // format conversion. This prevents downstream scale filters from failing
-      // to configure their output pads during graph reinitialization (the
-      // "Failed to configure output pad on Parsed_scale_N" error).
-      filterParts.push(`[${streamIdx}:v]scale=${srcW}:${srcH},format=rgba,setsar=1:1[${fmtLabel}]`)
-
-      if (vRefCount > 1) {
-        const labels: string[] = []
-        const outputs: string[] = []
-        for (let i = 0; i < vRefCount; i++) {
-          const lbl = nextLabel("sv")
-          labels.push(lbl)
-          outputs.push(`[${lbl}]`)
-        }
-        filterParts.push(`[${fmtLabel}]split=${vRefCount}${outputs.join("")}`)
-        videoSourceLabels.set(info.mediaId, labels)
-      } else {
-        videoSourceLabels.set(info.mediaId, [fmtLabel])
+    if (vRefCount > 1) {
+      const labels: string[] = []
+      const outputs: string[] = []
+      for (let i = 0; i < vRefCount; i++) {
+        const lbl = nextLabel("sv")
+        labels.push(lbl)
+        outputs.push(`[${lbl}]`)
       }
+      filterParts.push(`[${streamIdx}:v]split=${vRefCount}${outputs.join("")}`)
+      videoSourceLabels.set(info.mediaId, labels)
+    } else if (vRefCount === 1) {
+      videoSourceLabels.set(info.mediaId, [`${streamIdx}:v`])
     }
 
     if (info.hasAudio && aRefCount > 1) {
@@ -277,6 +265,7 @@ export function buildFilterGraph(
       // Source is already in rgba format (converted in Phase 2).
       const sourceLabel = getVideoSourceLabel(seg.id)
       const filters: string[] = []
+      filters.push("format=rgba")
       filters.push("setpts=PTS-STARTPTS")
       filters.push(`fps=${targetFps},setpts=PTS-STARTPTS,setsar=1:1`)
       filterParts.push(`[${sourceLabel}]${filters.join(",")}[${outLabel}]`)
@@ -311,8 +300,9 @@ export function buildFilterGraph(
     let curW = probe?.width ?? targetW
     let curH = probe?.height ?? targetH
 
-    // format=rgba is already applied at the source level (Phase 2)
-    // before split, so all segment chains receive rgba input.
+    // Convert to RGBA for alpha-channel compositing between layers.
+    // Transparent padding lets lower tracks show through where clips don't fill the canvas.
+    filters.push("format=rgba")
 
     if (seg.type === "image") {
       filters.push("setpts=PTS-STARTPTS")

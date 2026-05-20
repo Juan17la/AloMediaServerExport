@@ -192,7 +192,11 @@ export function buildFilterGraph(
     audioRefCount.set(seg.mediaId, (audioRefCount.get(seg.mediaId) ?? 0) + 1)
   }
 
-  // Phase 2: Build split/asplit filters for multi-referenced inputs
+  // Phase 2: Build split/asplit filters for multi-referenced inputs.
+  // All video inputs are converted to rgba upfront (before any split) to
+  // eliminate per-branch format negotiation points. This prevents FFmpeg from
+  // auto-inserting auto_scale filters that fail to configure their output pads
+  // in complex filter graphs (the "auto_scale Failed to configure output pad" error).
   const videoSourceLabels = new Map<string, string[]>()
   const audioSourceLabels = new Map<string, string[]>()
 
@@ -201,18 +205,23 @@ export function buildFilterGraph(
     const aRefCount = audioRefCount.get(info.mediaId) ?? 0
     const streamIdx = info.inputIndex
 
-    if (vRefCount > 1) {
-      const labels: string[] = []
-      const outputs: string[] = []
-      for (let i = 0; i < vRefCount; i++) {
-        const lbl = nextLabel("sv")
-        labels.push(lbl)
-        outputs.push(`[${lbl}]`)
+    if (vRefCount > 0) {
+      const fmtLabel = nextLabel("vfmt")
+      filterParts.push(`[${streamIdx}:v]format=rgba[${fmtLabel}]`)
+
+      if (vRefCount > 1) {
+        const labels: string[] = []
+        const outputs: string[] = []
+        for (let i = 0; i < vRefCount; i++) {
+          const lbl = nextLabel("sv")
+          labels.push(lbl)
+          outputs.push(`[${lbl}]`)
+        }
+        filterParts.push(`[${fmtLabel}]split=${vRefCount}${outputs.join("")}`)
+        videoSourceLabels.set(info.mediaId, labels)
+      } else {
+        videoSourceLabels.set(info.mediaId, [fmtLabel])
       }
-      filterParts.push(`[${streamIdx}:v]split=${vRefCount}${outputs.join("")}`)
-      videoSourceLabels.set(info.mediaId, labels)
-    } else if (vRefCount === 1) {
-      videoSourceLabels.set(info.mediaId, [`${streamIdx}:v`])
     }
 
     if (info.hasAudio && aRefCount > 1) {
@@ -258,9 +267,9 @@ export function buildFilterGraph(
     if (seg.type === "text" && textSegmentsWithPng.has(seg.id)) {
       // Text with pre-rendered PNG: treat as image input.
       // PNGs are pre-rendered at target resolution so no scaling/padding needed.
+      // Source is already in rgba format (converted in Phase 2).
       const sourceLabel = getVideoSourceLabel(seg.id)
       const filters: string[] = []
-      filters.push("format=rgba")
       filters.push("setpts=PTS-STARTPTS")
       filters.push(`fps=${targetFps},setpts=PTS-STARTPTS,setsar=1:1`)
       filterParts.push(`[${sourceLabel}]${filters.join(",")}[${outLabel}]`)
@@ -295,9 +304,8 @@ export function buildFilterGraph(
     let curW = probe?.width ?? targetW
     let curH = probe?.height ?? targetH
 
-    // Convert to RGBA for alpha-channel compositing between layers.
-    // Transparent padding lets lower tracks show through where clips don't fill the canvas.
-    filters.push("format=rgba")
+    // format=rgba is already applied at the source level (Phase 2)
+    // before split, so all segment chains receive rgba input.
 
     if (seg.type === "image") {
       filters.push("setpts=PTS-STARTPTS")
@@ -393,9 +401,10 @@ export function buildFilterGraph(
       filters.push(`scale=${fitW}:${fitH},pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2:color=black@0`)
     } else if (curW !== targetW || curH !== targetH) {
       filters.push(`pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2:color=black@0`)
-    } else {
-      filters.push("format=rgba")
     }
+    // When curW === targetW && curH === targetH, content already matches
+    // the output dimensions. No resize/pad filter needed — the stream is
+    // already in rgba format from Phase 2.
 
     // Normalize fps, timebase, and SAR so all segments are consistent before
     // concat/xfade/overlay operations. Without this, decoded video files carry

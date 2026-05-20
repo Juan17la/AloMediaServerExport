@@ -46,6 +46,11 @@ export function buildServerCommand(
   const { outputTarget } = plan
   const args: string[] = ["-y"]
 
+  // Use consistent scaling algorithm for all sws operations (including
+  // auto-inserted scale filters) to prevent "Failed to configure
+  // output pad" errors on complex filter graphs.
+  args.push("-sws_flags", "lanczos+accurate_rnd")
+
   // Note: -hwaccel flags are intentionally omitted. When using -filter_complex,
   // FFmpeg operates in software. GPU encoding (h264_nvenc/h264_qsv) still works
   // without hwaccel — it just means software decoding + filtering, then GPU encode.

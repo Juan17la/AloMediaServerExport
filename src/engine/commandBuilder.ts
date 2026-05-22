@@ -1,39 +1,9 @@
 import type { RenderPlan, FilterGraphResult } from "../types.js"
 
-const ENCODING_PRESETS: Record<string, { codec: string; preset: string; crf: number; audioBitrate: number }> = {
-  fast: { codec: "libx264", preset: "ultrafast", crf: 30, audioBitrate: 128 },
-  medium: { codec: "libx264", preset: "fast", crf: 26, audioBitrate: 192 },
-  slow: { codec: "libx264", preset: "medium", crf: 22, audioBitrate: 256 },
-}
-
-const GPU_PRESETS_NVENC: Record<string, { codec: string; preset: string; crf: number; audioBitrate: number }> = {
-  fast: { codec: "h264_nvenc", preset: "p1", crf: 30, audioBitrate: 128 },
-  medium: { codec: "h264_nvenc", preset: "p4", crf: 26, audioBitrate: 192 },
-  slow: { codec: "h264_nvenc", preset: "p7", crf: 22, audioBitrate: 256 },
-}
-
-const GPU_PRESETS_QSV: Record<string, { codec: string; preset: string; crf: number; audioBitrate: number }> = {
-  fast: { codec: "h264_qsv", preset: "veryfast", crf: 30, audioBitrate: 128 },
-  medium: { codec: "h264_qsv", preset: "medium", crf: 26, audioBitrate: 192 },
-  slow: { codec: "h264_qsv", preset: "slow", crf: 22, audioBitrate: 256 },
-}
-
 const FAST_CODEC_ARGS: Record<string, string[]> = {
   h264: ["-profile:v", "baseline", "-level", "3.1"],
   vp9: ["-row-mt", "1", "-threads", "4"],
   av1: ["-cpu-used", "8", "-row-mt", "1"],
-}
-
-function getPresetConfig(preset: string, gpuCodec: string | null) {
-  if (gpuCodec) {
-    if (gpuCodec.includes("nvenc")) {
-      return GPU_PRESETS_NVENC[preset] ?? GPU_PRESETS_NVENC.fast
-    }
-    if (gpuCodec.includes("qsv")) {
-      return GPU_PRESETS_QSV[preset] ?? GPU_PRESETS_QSV.fast
-    }
-  }
-  return ENCODING_PRESETS[preset] ?? ENCODING_PRESETS.fast
 }
 
 export function buildServerCommand(
@@ -41,7 +11,6 @@ export function buildServerCommand(
   plan: RenderPlan,
   outputFile: string,
   gpuCodec: string | null,
-  encodingPreset: string,
 ): string[] {
   const { outputTarget } = plan
   const args: string[] = ["-y", "-nostdin"]
@@ -83,24 +52,10 @@ export function buildServerCommand(
     args.push("-map", "0:v")
   }
 
-  const presetConfig = getPresetConfig(encodingPreset, gpuCodec)
-
-  if (gpuCodec) {
-    args.push("-c:v", presetConfig.codec)
-  } else {
-    const codecName = mapCodecForNative(outputTarget.codec as string)
-    args.push("-c:v", codecName)
-  }
-
-  // CRF is not valid for most GPU encoders — use -qp or -b:v instead
-  if (gpuCodec) {
-    const qpValue = presetConfig.crf
-    args.push("-qp", String(qpValue))
-  } else {
-    args.push("-crf", String(presetConfig.crf))
-  }
-
-  args.push("-preset", presetConfig.preset)
+  const effectiveCodec = gpuCodec ?? mapCodecForNative(outputTarget.codec as string)
+  args.push("-c:v", effectiveCodec)
+  args.push("-crf", String(outputTarget.crf))
+  args.push("-preset", outputTarget.preset)
 
   if (outputTarget.tune && !gpuCodec) {
     args.push("-tune", outputTarget.tune)

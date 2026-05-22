@@ -171,7 +171,15 @@ async function encodeChunk(
     textImagePaths,
     chunkDuration,
   )
-  const args = buildServerCommand(graph, chunkPlan, task.outputPath, gpuCodec, "fast")
+  const args = buildServerCommand(graph, chunkPlan, task.outputPath, gpuCodec)
+
+  // DEBUG: log full filter graph for diagnosis
+  console.log(`[chunkedEncoder] jobId=${job.id} — Chunk [${task.start.toFixed(2)}-${task.end.toFixed(2)}s] INPUT ARGS:`)
+  console.log(graph.inputArgs.join(" "))
+  console.log(`[chunkedEncoder] jobId=${job.id} — Chunk [${task.start.toFixed(2)}-${task.end.toFixed(2)}s] FILTER_COMPLEX:`)
+  console.log(graph.filterComplex)
+  console.log(`[chunkedEncoder] jobId=${job.id} — Chunk [${task.start.toFixed(2)}-${task.end.toFixed(2)}s] MAPPING ARGS:`)
+  console.log(graph.mappingArgs.join(" "))
 
   const result = await runFfmpeg(args, job, () => {}, abortSignal)
 

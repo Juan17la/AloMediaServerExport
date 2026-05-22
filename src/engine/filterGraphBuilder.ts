@@ -174,11 +174,11 @@ export function buildFilterGraph(
     const pngPath = textImagePaths.get(segId)!.replace(/\\/g, "/")
     const dur = segmentDuration(seg)
 
-    inputIndexByMediaId.set(segId, inputIndex)
+    inputIndexByMediaId.set(seg.mediaId, inputIndex)
     inputArgs.push("-loop", "1", "-t", dur.toFixed(3), "-i", pngPath)
 
     inputInfos.push({
-      mediaId: segId,
+      mediaId: seg.mediaId,
       inputIndex,
       isImage: true,
       filePath: pngPath,
@@ -195,7 +195,7 @@ export function buildFilterGraph(
 
   for (const seg of videoSegments) {
     if (seg.type === "text" && !textSegmentsWithPng.has(seg.id)) continue
-    const key = seg.type === "text" ? seg.id : seg.mediaId
+    const key = seg.mediaId
     videoRefCount.set(key, (videoRefCount.get(key) ?? 0) + 1)
   }
   for (const seg of audioSegments) {
@@ -224,7 +224,7 @@ export function buildFilterGraph(
         labels.push(lbl)
         outputs.push(`[${lbl}]`)
       }
-      filterParts.push(`[${streamIdx}:v]split=${vRefCount}${outputs.join("")}`)
+      filterParts.push(`[${streamIdx}:v]format=rgba,split=${vRefCount}${outputs.join("")}`)
       videoSourceLabels.set(info.mediaId, labels)
     } else if (vRefCount === 1) {
       videoSourceLabels.set(info.mediaId, [`${streamIdx}:v`])
@@ -271,15 +271,19 @@ export function buildFilterGraph(
     const outLabel = nextLabel("segv")
 
     if (seg.type === "text" && textSegmentsWithPng.has(seg.id)) {
-      // Text with pre-rendered PNG: treat as image input.
-      // PNGs are pre-rendered at target resolution so no scaling/padding needed.
-      // Source is already in rgba format (converted in Phase 2).
-      const sourceLabel = getVideoSourceLabel(seg.id)
+      const sourceLabel = getVideoSourceLabel(seg.mediaId)
       const filters: string[] = []
-      filters.push("format=rgba")
-      filters.push("setpts=PTS-STARTPTS")
-    filters.push(`format=rgba,fps=${targetFps},setpts=PTS-STARTPTS,setsar=1:1`)
-      filterParts.push(`[${sourceLabel}]${filters.join(",")}[${outLabel}]`)
+      filters.push("format=rgba", "setpts=PTS-STARTPTS")
+      filters.push(
+        `scale=${targetW}:${targetH}:force_original_aspect_ratio=decrease,pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2:color=black@0`,
+        `fps=${targetFps},setpts=PTS-STARTPTS,setsar=1:1`,
+      )
+      if (filters.length > 0) {
+        filterParts.push(`[${sourceLabel}]${filters.join(",")}[${outLabel}]`)
+      } else {
+        segVideoLabels.set(seg.id, sourceLabel)
+        continue
+      }
       segVideoLabels.set(seg.id, outLabel)
       continue
     }
@@ -316,7 +320,6 @@ export function buildFilterGraph(
     filters.push("format=rgba")
 
     if (seg.type === "image") {
-      filters.push(`trim=start=0:end=${segmentDuration(seg).toFixed(3)}`)
       filters.push("setpts=PTS-STARTPTS")
     } else {
       if (seg.mediaStart > 0.001 || (probe && Math.abs(seg.mediaEnd - probe.duration) > 0.001)) {

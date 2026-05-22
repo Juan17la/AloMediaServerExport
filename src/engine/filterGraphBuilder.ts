@@ -601,13 +601,18 @@ export function buildFilterGraph(
             filterParts.push(`[${workingLabel}]fade=t=out:st=${fadeStart.toFixed(3)}:d=${fadeDuration.toFixed(3)}[${outLabel}]`)
             currentLabel = normalizeTb(outLabel)
           } else {
-            filterParts.push(`[${workingLabel}][${segBLabel}]xfade=transition=${xfadeName}:duration=${fadeDuration.toFixed(3)}:offset=${offset.toFixed(3)}[${outLabel}]`)
+            // Split segB so we can feed one copy into xfade and another into trim
+            const segBForXfade = nextLabel("sb")
+            const segBForTrim = nextLabel("sb")
+            filterParts.push(`[${segBLabel}]split=2[${segBForXfade}][${segBForTrim}]`)
+
+            filterParts.push(`[${workingLabel}][${segBForXfade}]xfade=transition=${xfadeName}:duration=${fadeDuration.toFixed(3)}:offset=${offset.toFixed(3)}[${outLabel}]`)
             // Append the remainder of segB after the crossfade
             const remainderDuration = segmentDuration(sorted[i]) - fadeDuration
             if (remainderDuration > 0.01) {
               const remainderLabel = nextLabel("txr")
               const concatOut = nextLabel("trk")
-              filterParts.push(`[${segBLabel}]trim=start=${fadeDuration.toFixed(3)}:end=${segmentDuration(sorted[i]).toFixed(3)},setpts=PTS-STARTPTS[${remainderLabel}]`)
+              filterParts.push(`[${segBForTrim}]trim=start=${fadeDuration.toFixed(3)}:end=${segmentDuration(sorted[i]).toFixed(3)},setpts=PTS-STARTPTS[${remainderLabel}]`)
               filterParts.push(`[${outLabel}][${remainderLabel}]concat=n=2:v=1:a=0[${concatOut}]`)
               currentLabel = normalizeTb(concatOut)
             } else {

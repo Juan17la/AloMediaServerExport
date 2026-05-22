@@ -29,14 +29,24 @@ function nextLabel(prefix: string = "v"): string {
   return `${prefix}${_labelIdx++}`
 }
 
-function hasAudioStream(seg: RenderSegment, probe?: MediaProbeResult): boolean {
+function hasAudioStream(seg: RenderSegment, _probe?: MediaProbeResult): boolean {
   if (seg.type === "audio") return true
-  if (seg.type === "video") return probe?.audioCodec != null
+  if (seg.type === "video") return true
   return false
 }
 
 function segmentDuration(seg: RenderSegment): number {
   return Math.max(0, seg.timelineEnd - seg.timelineStart)
+}
+
+function segmentStreamDuration(seg: RenderSegment): number {
+  if (seg.type === "text" || seg.type === "image") {
+    return segmentDuration(seg)
+  }
+  const mediaDur = Math.max(0, seg.mediaEnd - seg.mediaStart)
+  const speed = seg.speed ?? DEFAULT_SPEED
+  if (Math.abs(speed - 1.0) < 0.001) return mediaDur
+  return mediaDur / speed
 }
 
 function isIdentityTransform(transform: RenderSegment["transform"]): boolean {
@@ -268,7 +278,7 @@ export function buildFilterGraph(
       const filters: string[] = []
       filters.push("format=rgba")
       filters.push("setpts=PTS-STARTPTS")
-      filters.push(`fps=${targetFps},setpts=PTS-STARTPTS,setsar=1:1`)
+    filters.push(`format=rgba,fps=${targetFps},setpts=PTS-STARTPTS,setsar=1:1`)
       filterParts.push(`[${sourceLabel}]${filters.join(",")}[${outLabel}]`)
       segVideoLabels.set(seg.id, outLabel)
       continue
@@ -306,6 +316,7 @@ export function buildFilterGraph(
     filters.push("format=rgba")
 
     if (seg.type === "image") {
+      filters.push(`trim=start=0:end=${segmentDuration(seg).toFixed(3)}`)
       filters.push("setpts=PTS-STARTPTS")
     } else {
       if (seg.mediaStart > 0.001 || (probe && Math.abs(seg.mediaEnd - probe.duration) > 0.001)) {
@@ -397,7 +408,7 @@ export function buildFilterGraph(
       fitH = Math.min(fitH, targetH)
       const padX = Math.round((targetW - fitW) / 2)
       const padY = Math.round((targetH - fitH) / 2)
-      filters.push(`scale=${fitW}:${fitH},pad=${targetW}:${targetH}:${padX}:${padY}:color=black@0`)
+      filters.push(`format=rgba,scale=${fitW}:${fitH},pad=${targetW}:${targetH}:${padX}:${padY}:color=black@0`)
     }
 
     // Normalize fps, timebase, and SAR so all segments are consistent before
@@ -495,6 +506,8 @@ export function buildFilterGraph(
     const trackTransitions = transitions.filter((t) => t.trackId === sorted[0]?.trackId)
     const hasTransitions = trackTransitions.length > 0
 
+    let trackDuration = sorted[sorted.length - 1].timelineEnd
+
     if (sorted.length === 1) {
       const seg = sorted[0]
       const segLabel = segVideoLabels.get(seg.id) ?? nextLabel("trk")
@@ -534,7 +547,7 @@ export function buildFilterGraph(
       trackVideoLabels.set(trackOrder, normalizeTb(concatOut))
     } else {
       let currentLabel = segVideoLabels.get(sorted[0].id) ?? nextLabel("trk")
-      let currentDuration = segmentDuration(sorted[0])
+      let currentDuration = segmentStreamDuration(sorted[0])
 
       if (sorted[0].timelineStart > 0.01) {
         const gapDur = sorted[0].timelineStart
@@ -552,8 +565,9 @@ export function buildFilterGraph(
         "clipId" in t.clipBRef && t.clipBRef.clipId === sorted[0].clipId
       )
       if (fadeInT) {
+        const clampedFadeInDur = Math.min(fadeInT.durationS, currentDuration)
         const fadeLabel = nextLabel("tx")
-        filterParts.push(`[${currentLabel}]fade=t=in:st=0:d=${fadeInT.durationS.toFixed(3)}[${fadeLabel}]`)
+        filterParts.push(`[${currentLabel}]fade=t=in:st=0:d=${clampedFadeInDur.toFixed(3)}[${fadeLabel}]`)
         currentLabel = normalizeTb(fadeLabel)
       }
 
@@ -571,9 +585,11 @@ export function buildFilterGraph(
           const concatOut = nextLabel("trk")
           filterParts.push(`[${segALabel}][${gapLabel}][${segBLabel}]concat=n=3:v=1:a=0[${concatOut}]`)
           currentLabel = normalizeTb(concatOut)
-          currentDuration += gapBetween + segmentDuration(sorted[i])
+          currentDuration += gapBetween + segmentStreamDuration(sorted[i])
         } else if (transition) {
-          const fadeDuration = transition.durationS
+          const streamDurB = segmentStreamDuration(sorted[i])
+          const maxFadeFromA = currentDuration
+          const fadeDuration = Math.min(transition.durationS, maxFadeFromA, streamDurB)
           let workingLabel = segALabel
 
           // If there is a gap between clips, insert it BEFORE the transition
@@ -592,13 +608,15 @@ export function buildFilterGraph(
           const xfadeName = resolveXfadeName(transition.typeCanonical)
 
           if (transition.clipARef && "synthetic" in transition.clipARef && transition.clipARef.synthetic === "black_silence") {
-            filterParts.push(`[${segBLabel}]fade=t=in:st=0:d=${fadeDuration.toFixed(3)}[${outLabel}_fadein]`)
+            const clampedFade = Math.min(fadeDuration, streamDurB)
+            filterParts.push(`[${segBLabel}]fade=t=in:st=0:d=${clampedFade.toFixed(3)}[${outLabel}_fadein]`)
             const fadeOutLabel = `${outLabel}_fadein`
             currentLabel = normalizeTb(fadeOutLabel)
-            currentDuration += segmentDuration(sorted[i])
+            currentDuration += streamDurB
           } else if (transition.clipBRef && "synthetic" in transition.clipBRef && transition.clipBRef.synthetic === "black_silence") {
-            const fadeStart = Math.max(0, currentDuration - fadeDuration)
-            filterParts.push(`[${workingLabel}]fade=t=out:st=${fadeStart.toFixed(3)}:d=${fadeDuration.toFixed(3)}[${outLabel}]`)
+            const clampedFade = Math.min(fadeDuration, currentDuration)
+            const fadeStart = Math.max(0, currentDuration - clampedFade)
+            filterParts.push(`[${workingLabel}]fade=t=out:st=${fadeStart.toFixed(3)}:d=${clampedFade.toFixed(3)}[${outLabel}]`)
             currentLabel = normalizeTb(outLabel)
           } else {
             // Split segB so we can feed one copy into xfade and another into trim
@@ -608,23 +626,23 @@ export function buildFilterGraph(
 
             filterParts.push(`[${workingLabel}][${segBForXfade}]xfade=transition=${xfadeName}:duration=${fadeDuration.toFixed(3)}:offset=${offset.toFixed(3)}[${outLabel}]`)
             // Append the remainder of segB after the crossfade
-            const remainderDuration = segmentDuration(sorted[i]) - fadeDuration
-            if (remainderDuration > 0.01) {
+            const remainderStreamDur = streamDurB - fadeDuration
+            if (remainderStreamDur > 0.01) {
               const remainderLabel = nextLabel("txr")
               const concatOut = nextLabel("trk")
-              filterParts.push(`[${segBForTrim}]trim=start=${fadeDuration.toFixed(3)}:end=${segmentDuration(sorted[i]).toFixed(3)},setpts=PTS-STARTPTS[${remainderLabel}]`)
+              filterParts.push(`[${segBForTrim}]trim=start=${fadeDuration.toFixed(3)}:end=${streamDurB.toFixed(3)},setpts=PTS-STARTPTS[${remainderLabel}]`)
               filterParts.push(`[${outLabel}][${remainderLabel}]concat=n=2:v=1:a=0[${concatOut}]`)
               currentLabel = normalizeTb(concatOut)
             } else {
               currentLabel = normalizeTb(outLabel)
             }
-            currentDuration = currentDuration + segmentDuration(sorted[i]) - fadeDuration
+            currentDuration = currentDuration + streamDurB - fadeDuration
           }
         } else {
           const concatOut = nextLabel("trk")
           filterParts.push(`[${segALabel}][${segBLabel}]concat=n=2:v=1:a=0[${concatOut}]`)
           currentLabel = normalizeTb(concatOut)
-          currentDuration += segmentDuration(sorted[i])
+          currentDuration += segmentStreamDuration(sorted[i])
         }
       }
 
@@ -635,20 +653,21 @@ export function buildFilterGraph(
         "synthetic" in t.clipBRef && t.clipBRef.synthetic === "black_silence"
       )
       if (fadeOutT) {
-        const fadeStart = Math.max(0, currentDuration - fadeOutT.durationS)
+        const clampedFadeOutDur = Math.min(fadeOutT.durationS, currentDuration)
+        const fadeStart = Math.max(0, currentDuration - clampedFadeOutDur)
         const fadeLabel = nextLabel("tx")
-        filterParts.push(`[${currentLabel}]fade=t=out:st=${fadeStart.toFixed(3)}:d=${fadeOutT.durationS.toFixed(3)}[${fadeLabel}]`)
+        filterParts.push(`[${currentLabel}]fade=t=out:st=${fadeStart.toFixed(3)}:d=${clampedFadeOutDur.toFixed(3)}[${fadeLabel}]`)
         currentLabel = normalizeTb(fadeLabel)
       }
 
       trackVideoLabels.set(trackOrder, currentLabel)
+      trackDuration = currentDuration
     }
 
     // Pad each track to the full project duration with a transparent trailing gap.
     // Without this, tracks that end before the project ends will freeze their last
     // opaque frame — covering lower tracks for the remaining duration.
-    const trackEnd = sorted[sorted.length - 1].timelineEnd
-    const trailingGap = projectDuration - trackEnd
+    const trailingGap = projectDuration - trackDuration
     if (trailingGap > 0.05) {
       const currentLabel = trackVideoLabels.get(trackOrder)!
       const gapLabel = nextLabel("gap")
@@ -699,6 +718,12 @@ export function buildFilterGraph(
     finalAudioLabel = nextLabel("outa")
     const inputs = audioLabels.map((l) => `[${l}]`).join("")
     filterParts.push(`${inputs}amix=inputs=${audioLabels.length}:duration=longest:normalize=1[${finalAudioLabel}]`)
+  }
+
+  if (finalAudioLabel) {
+    const paddedAudioLabel = nextLabel("outa")
+    filterParts.push(`[${finalAudioLabel}]apad,atrim=duration=${projectDuration.toFixed(3)}[${paddedAudioLabel}]`)
+    finalAudioLabel = paddedAudioLabel
   }
 
   // Phase 10: Build output mapping

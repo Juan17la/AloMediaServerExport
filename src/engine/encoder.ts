@@ -137,6 +137,12 @@ export async function runFfmpeg(
       clearTimeout(overallTimeout)
       cleanupFontconfig()
       console.log(`[encoder] jobId=${job.id} — FFmpeg closed — exitCode=${code}, signal=${signal}, frames=${lastFrames}, fps=${lastFps}`)
+      if (code !== 0 && !killedByAbort) {
+        const stderrTail = stderrBuffer ? stderrBuffer.slice(-4000) : ""
+        if (stderrTail) {
+          console.error(`[encoder] jobId=${job.id} — FFmpeg stderr (last 4000 chars):\n${stderrTail}`)
+        }
+      }
       const errorDetail = killedByAbort
         ? "FFmpeg was aborted (job cancelled)"
         : killedByTimeout

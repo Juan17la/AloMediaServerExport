@@ -79,3 +79,49 @@ export async function concatenateSegments(
     })
   })
 }
+
+export async function remuxToFormat(
+  inputFile: string,
+  outputFile: string,
+  format: string,
+): Promise<void> {
+  const args: string[] = [
+    "-y",
+    "-nostdin",
+    "-i", inputFile,
+    "-c", "copy",
+  ]
+
+  if (format === "mp4" || format === "mov") {
+    args.push("-movflags", "+faststart")
+  }
+
+  args.push(outputFile)
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(config.ffmpegPath, args, {
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    let stderr = ""
+    const MAX_STDERR = 10_000
+    child.stderr?.on("data", (data: Buffer) => {
+      stderr += data.toString()
+      if (stderr.length > MAX_STDERR) {
+        stderr = stderr.slice(-MAX_STDERR)
+      }
+    })
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve()
+      } else {
+        reject(new Error(`Remux failed with code ${code}: ${stderr.slice(-500)}`))
+      }
+    })
+
+    child.on("error", (err) => {
+      reject(err)
+    })
+  })
+}

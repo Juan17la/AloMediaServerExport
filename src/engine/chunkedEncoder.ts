@@ -2,7 +2,7 @@ import type { RenderPlan, ExportJob, RenderSegment, RenderTransition, MediaProbe
 import { buildFilterGraph } from "./filterGraphBuilder.js"
 import { buildServerCommand } from "./commandBuilder.js"
 import { runFfmpeg } from "./encoder.js"
-import { concatenateSegments } from "./concat.js"
+import { concatenateSegments, remuxToFormat } from "./concat.js"
 import { config } from "../config.js"
 import { join } from "node:path"
 import { unlink } from "node:fs/promises"
@@ -148,6 +148,7 @@ async function encodeChunk(
       "-nostdin",
       "-f", "lavfi",
       "-i", `color=c=black@0:s=${plan.outputTarget.resolution.width}x${plan.outputTarget.resolution.height}:r=${plan.outputTarget.fps}:d=${chunkDuration.toFixed(3)}`,
+      "-t", chunkDuration.toFixed(3),
       "-pix_fmt", plan.outputTarget.pixelFormat,
       "-c:v", gpuCodec || "libx264",
       "-preset", "ultrafast",
@@ -253,7 +254,7 @@ export async function executeChunkedEncode(
     const { start, end } = chunks[i]
     console.log(`[chunkedEncoder] jobId=${job.id} — Encoding chunk ${i + 1}/${chunks.length} [${start.toFixed(2)}s - ${end.toFixed(2)}s]`)
 
-    const chunkOutputPath = join(config.tempDir, "outputs", `job_${job.id}_chunk_${i}.${outputTarget.format}`)
+    const chunkOutputPath = join(config.tempDir, "outputs", `job_${job.id}_chunk_${i}.ts`)
     const encodeResult = await encodeChunk(
       job,
       plan,
@@ -282,26 +283,42 @@ export async function executeChunkedEncode(
     onProgress("encoding", overallPct, totalFramesProcessed, totalFrames)
   }
 
-  // Concatenate all chunks
-  console.log(`[chunkedEncoder] jobId=${job.id} — Concatenating ${chunkFiles.length} chunks...`)
+  // Concatenate all chunks into a TS file first (avoids MP4 atom boundary issues)
+  const concatPath = join(config.tempDir, "outputs", `${job.id}_concat.ts`)
+  console.log(`[chunkedEncoder] jobId=${job.id} — Concatenating ${chunkFiles.length} chunks into TS...`)
   onProgress("merging", 92, totalFramesProcessed, totalFrames)
 
   try {
-    await concatenateSegments(chunkFiles, outputPath)
+    await concatenateSegments(chunkFiles, concatPath)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     for (const f of chunkFiles) {
       await unlink(f).catch(() => {})
     }
+    await unlink(concatPath).catch(() => {})
     return { success: false, outputFilePath: null, error: `Concatenation failed: ${msg}`, framesProcessed: totalFramesProcessed }
   }
 
-  // Clean up intermediate chunk files
+  // Remux TS to final target format
+  onProgress("finalizing", 95, totalFramesProcessed, totalFrames)
+  try {
+    await remuxToFormat(concatPath, outputPath, outputTarget.format)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    for (const f of chunkFiles) {
+      await unlink(f).catch(() => {})
+    }
+    await unlink(concatPath).catch(() => {})
+    return { success: false, outputFilePath: null, error: `Remux failed: ${msg}`, framesProcessed: totalFramesProcessed }
+  }
+
+  // Clean up intermediate chunk files and concat file
   for (const f of chunkFiles) {
     await unlink(f).catch(() => {})
   }
+  await unlink(concatPath).catch(() => {})
 
-  onProgress("finalizing", 98, totalFrames, totalFrames)
+  onProgress("finalizing", 98, totalFramesProcessed, totalFrames)
   console.log(`[chunkedEncoder] jobId=${job.id} — Finished successfully`)
   return { success: true, outputFilePath: outputPath, error: null, framesProcessed: totalFrames }
 }

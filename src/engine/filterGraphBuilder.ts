@@ -384,11 +384,10 @@ export function buildFilterGraph(
       if (defFilter) filters.push(defFilter)
     }
 
-    // Final resize: scale content to fit within target dimensions while
+    // Final resize: always scale content to fit within target dimensions while
     // preserving aspect ratio, then center-pad to exact target size.
-    // Dimensions are pre-computed to avoid force_original_aspect_ratio=decrease
-    // which causes FFmpeg auto_scale negotiation failures on complex graphs.
-    if (curW > targetW || curH > targetH) {
+    // This ensures every segment is exactly targetW x targetH before concat/xfade.
+    if (curW !== targetW || curH !== targetH) {
       const fitScale = Math.min(targetW / curW, targetH / curH)
       let fitW = Math.round(curW * fitScale)
       let fitH = Math.round(curH * fitScale)
@@ -399,14 +398,7 @@ export function buildFilterGraph(
       const padX = Math.round((targetW - fitW) / 2)
       const padY = Math.round((targetH - fitH) / 2)
       filters.push(`scale=${fitW}:${fitH},pad=${targetW}:${targetH}:${padX}:${padY}:color=black@0`)
-    } else if (curW !== targetW || curH !== targetH) {
-      const padX = Math.round((targetW - curW) / 2)
-      const padY = Math.round((targetH - curH) / 2)
-      filters.push(`pad=${targetW}:${targetH}:${padX}:${padY}:color=black@0`)
     }
-    // When curW === targetW && curH === targetH, content already matches
-    // the output dimensions. No resize/pad filter needed — the stream is
-    // already in rgba format from Phase 2.
 
     // Normalize fps, timebase, and SAR so all segments are consistent before
     // concat/xfade/overlay operations. Without this, decoded video files carry
@@ -491,7 +483,7 @@ export function buildFilterGraph(
 
   function normalizeTb(label: string): string {
     const normLabel = nextLabel("ntb")
-    filterParts.push(`[${label}]setpts=PTS-STARTPTS,fps=${targetFps}[${normLabel}]`)
+    filterParts.push(`[${label}]setpts=PTS-STARTPTS,fps=${targetFps},setsar=1:1[${normLabel}]`)
     return normLabel
   }
 
@@ -571,6 +563,18 @@ export function buildFilterGraph(
           currentDuration += gapBetween + segmentDuration(sorted[i])
         } else if (transition) {
           const fadeDuration = transition.durationS
+          let workingLabel = segALabel
+
+          // If there is a gap between clips, insert it BEFORE the transition
+          if (gapBetween > 0.01) {
+            const gapLabel = nextLabel("gap")
+            filterParts.push(`color=black@0:s=${targetW}x${targetH}:d=${gapBetween.toFixed(3)}:rate=${targetFps},format=rgba,setpts=PTS-STARTPTS,fps=${targetFps},setsar=1:1[${gapLabel}]`)
+            const gapConcat = nextLabel("trk")
+            filterParts.push(`[${segALabel}][${gapLabel}]concat=n=2:v=1:a=0[${gapConcat}]`)
+            workingLabel = normalizeTb(gapConcat)
+            currentDuration += gapBetween
+          }
+
           const offset = Math.max(0, currentDuration - fadeDuration)
           const outLabel = nextLabel("tx")
 
@@ -582,11 +586,11 @@ export function buildFilterGraph(
             currentLabel = normalizeTb(fadeOutLabel)
             currentDuration += segmentDuration(sorted[i])
           } else if (transition.clipBRef && "synthetic" in transition.clipBRef && transition.clipBRef.synthetic === "black_silence") {
-            const fadeStart = Math.max(0, segmentDuration(sorted[i]) - fadeDuration)
-            filterParts.push(`[${segALabel}]fade=t=out:st=${fadeStart.toFixed(3)}:d=${fadeDuration.toFixed(3)}[${outLabel}]`)
+            const fadeStart = Math.max(0, currentDuration - fadeDuration)
+            filterParts.push(`[${workingLabel}]fade=t=out:st=${fadeStart.toFixed(3)}:d=${fadeDuration.toFixed(3)}[${outLabel}]`)
             currentLabel = normalizeTb(outLabel)
           } else {
-            filterParts.push(`[${segALabel}][${segBLabel}]xfade=transition=${xfadeName}:duration=${fadeDuration.toFixed(3)}:offset=${offset.toFixed(3)}[${outLabel}]`)
+            filterParts.push(`[${workingLabel}][${segBLabel}]xfade=transition=${xfadeName}:duration=${fadeDuration.toFixed(3)}:offset=${offset.toFixed(3)}[${outLabel}]`)
             currentLabel = normalizeTb(outLabel)
             currentDuration = currentDuration + segmentDuration(sorted[i]) - fadeDuration
           }
@@ -767,8 +771,7 @@ function findTransitionBetween(
   return transitions.find((t) => {
     const aId = "clipId" in t.clipARef ? t.clipARef.clipId : undefined
     const bId = "clipId" in t.clipBRef ? t.clipBRef.clipId : undefined
-    return (aId === segA.clipId && bId === segB.clipId) ||
-      (aId === segB.clipId && bId === segA.clipId)
+    return aId === segA.clipId && bId === segB.clipId
   })
 }
 

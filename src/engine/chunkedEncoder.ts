@@ -16,10 +16,54 @@ export interface ChunkedEncodeResult {
 
 const DEFAULT_CHUNK_DURATION_S = 30
 const MIN_CHUNK_SIZE_S = 5
+const DEFAULT_AUDIO_SAMPLE_RATE = 48000
+const DEFAULT_AUDIO_CHANNEL_LAYOUT = "stereo"
+
+interface AudioOutputOptions {
+  forceAudio: boolean
+  sampleRate: number
+  channelLayout: string
+}
 
 interface TimeChunk {
   start: number
   end: number
+}
+
+function channelLayoutFromChannels(channels?: number | null): string | null {
+  if (!channels) return null
+  if (channels === 1) return "mono"
+  if (channels === 2) return "stereo"
+  if (channels === 6) return "5.1"
+  return null
+}
+
+function resolveAudioOutputOptions(
+  plan: RenderPlan,
+  probeResultsMap: Map<string, MediaProbeResult>,
+): AudioOutputOptions {
+  let forceAudio = false
+  let sampleRate = DEFAULT_AUDIO_SAMPLE_RATE
+  let channelLayout = DEFAULT_AUDIO_CHANNEL_LAYOUT
+
+  for (const seg of plan.segments) {
+    if (seg.type === "text" || seg.type === "image") continue
+    const probe = probeResultsMap.get(seg.mediaId)
+    const hasAudio = seg.type === "audio" || (seg.type === "video" && probe?.audioCodec)
+    if (!hasAudio) continue
+
+    forceAudio = true
+    if (probe?.audioSampleRate) {
+      sampleRate = probe.audioSampleRate
+    }
+    const layout = channelLayoutFromChannels(probe?.audioChannels)
+    if (layout) {
+      channelLayout = layout
+    }
+    break
+  }
+
+  return { forceAudio, sampleRate, channelLayout }
 }
 
 function splitTimelineIntoChunks(
@@ -134,6 +178,7 @@ async function encodeChunk(
   assetPaths: Map<string, string>,
   textImagePaths: Map<string, string>,
   gpuCodec: string | null,
+  audioOutput: AudioOutputOptions,
   task: ChunkTask,
   abortSignal?: AbortSignal,
 ): Promise<{ success: boolean; outputPath: string | null; error?: string }> {
@@ -148,12 +193,20 @@ async function encodeChunk(
       "-nostdin",
       "-f", "lavfi",
       "-i", `color=c=black@0:s=${plan.outputTarget.resolution.width}x${plan.outputTarget.resolution.height}:r=${plan.outputTarget.fps}:d=${chunkDuration.toFixed(3)}`,
+      ...(audioOutput.forceAudio
+        ? [
+          "-f", "lavfi",
+          "-i", `anullsrc=channel_layout=${audioOutput.channelLayout}:sample_rate=${audioOutput.sampleRate}`,
+        ]
+        : []),
       "-t", chunkDuration.toFixed(3),
       "-pix_fmt", plan.outputTarget.pixelFormat,
       "-c:v", gpuCodec || "libx264",
       "-preset", "ultrafast",
       "-crf", "30",
-      "-an",
+      ...(audioOutput.forceAudio
+        ? ["-c:a", plan.outputTarget.audioCodec, "-b:a", `${plan.outputTarget.audioBitrate}k`]
+        : ["-an"]),
       task.outputPath,
     ]
 
@@ -170,6 +223,11 @@ async function encodeChunk(
     assetPaths,
     textImagePaths,
     chunkDuration,
+    {
+      forceAudio: audioOutput.forceAudio,
+      audioSampleRate: audioOutput.sampleRate,
+      audioChannelLayout: audioOutput.channelLayout,
+    },
   )
   const args = buildServerCommand(graph, chunkPlan, task.outputPath, gpuCodec)
 
@@ -195,14 +253,14 @@ async function encodeChunk(
     const leftPath = task.outputPath.replace(/(\.[^.]+)$/, `_retry_l$1`)
     const rightPath = task.outputPath.replace(/(\.[^.]+)$/, `_retry_r$1`)
 
-    const leftResult = await encodeChunk(job, plan, probeResultsMap, assetPaths, textImagePaths, gpuCodec, { start: task.start, end: mid, outputPath: leftPath }, abortSignal)
+    const leftResult = await encodeChunk(job, plan, probeResultsMap, assetPaths, textImagePaths, gpuCodec, audioOutput, { start: task.start, end: mid, outputPath: leftPath }, abortSignal)
     if (!leftResult.success) {
       await unlink(leftPath).catch(() => {})
       await unlink(rightPath).catch(() => {})
       return { success: false, outputPath: null, error: leftResult.error }
     }
 
-    const rightResult = await encodeChunk(job, plan, probeResultsMap, assetPaths, textImagePaths, gpuCodec, { start: mid, end: task.end, outputPath: rightPath }, abortSignal)
+    const rightResult = await encodeChunk(job, plan, probeResultsMap, assetPaths, textImagePaths, gpuCodec, audioOutput, { start: mid, end: task.end, outputPath: rightPath }, abortSignal)
     if (!rightResult.success) {
       await unlink(leftPath).catch(() => {})
       await unlink(rightPath).catch(() => {})
@@ -244,6 +302,7 @@ export async function executeChunkedEncode(
 ): Promise<ChunkedEncodeResult> {
   const chunkDurationS = config.chunkDurationS || DEFAULT_CHUNK_DURATION_S
   const chunks = splitTimelineIntoChunks(plan.projectDuration, chunkDurationS, plan.transitions)
+  const audioOutput = resolveAudioOutputOptions(plan, probeResultsMap)
 
   console.log(`[chunkedEncoder] jobId=${job.id} — Split into ${chunks.length} chunks (max=${chunkDurationS}s)`)
 
@@ -270,6 +329,7 @@ export async function executeChunkedEncode(
       assetPaths,
       textImagePaths,
       gpuCodec,
+      audioOutput,
       { start, end, outputPath: chunkOutputPath },
       abortSignal,
     )

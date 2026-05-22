@@ -22,6 +22,14 @@ interface InputInfo {
 // are in pixel coordinates on this canvas.
 const CANVAS_W = 1280
 const CANVAS_H = 720
+const DEFAULT_AUDIO_SAMPLE_RATE = 48000
+const DEFAULT_AUDIO_CHANNEL_LAYOUT = "stereo"
+
+interface AudioOutputOptions {
+  forceAudio?: boolean
+  audioSampleRate?: number
+  audioChannelLayout?: string
+}
 
 let _labelIdx = 0
 
@@ -90,9 +98,13 @@ export function buildFilterGraph(
   filePaths: Map<string, string>,
   textImagePaths: Map<string, string> = new Map(),
   overrideProjectDuration?: number,
+  options?: AudioOutputOptions,
 ): FilterGraphResult {
   const { segments, transitions, outputTarget } = plan
   const { width: targetW, height: targetH } = outputTarget.resolution
+  const forceAudio = options?.forceAudio ?? false
+  const audioSampleRate = options?.audioSampleRate ?? DEFAULT_AUDIO_SAMPLE_RATE
+  const audioChannelLayout = options?.audioChannelLayout ?? DEFAULT_AUDIO_CHANNEL_LAYOUT
 
   // Total project duration — every track must be padded to this length
   // so that clips ending early don't freeze their last opaque frame.
@@ -725,8 +737,21 @@ export function buildFilterGraph(
 
   if (finalAudioLabel) {
     const paddedAudioLabel = nextLabel("outa")
-    filterParts.push(`[${finalAudioLabel}]apad,atrim=duration=${projectDuration.toFixed(3)}[${paddedAudioLabel}]`)
+    const audioFilters = [
+      "apad",
+      `atrim=duration=${projectDuration.toFixed(3)}`,
+    ]
+    if (forceAudio) {
+      audioFilters.push(`aformat=sample_rates=${audioSampleRate}:channel_layouts=${audioChannelLayout}`)
+    }
+    filterParts.push(`[${finalAudioLabel}]${audioFilters.join(",")}[${paddedAudioLabel}]`)
     finalAudioLabel = paddedAudioLabel
+  } else if (forceAudio) {
+    const silentAudioLabel = nextLabel("outa")
+    filterParts.push(
+      `anullsrc=channel_layout=${audioChannelLayout}:sample_rate=${audioSampleRate},atrim=duration=${projectDuration.toFixed(3)},asetpts=PTS-STARTPTS[${silentAudioLabel}]`,
+    )
+    finalAudioLabel = silentAudioLabel
   }
 
   // Phase 10: Build output mapping
